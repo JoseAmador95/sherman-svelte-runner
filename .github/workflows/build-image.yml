@@ -3,6 +3,8 @@ name: build-image
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**.md'          # cambios solo de docs no re-disparan el build multi-arch
   # Diario: reconstruye para HEREDAR los arreglos del gh_runner base (que a su
   # vez se reconstruye a diario con la última versión de actions/runner).
   schedule:

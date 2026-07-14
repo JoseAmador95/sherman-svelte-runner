@@ -20,19 +20,32 @@ con el toolchain del proyecto y sus servicios sidecar.
 
 ## Desplegar
 
-En una máquina del fleet, en un **directorio dedicado**, con el
-`compose.override.yaml` de este repo presente en ese directorio:
+En una máquina del fleet, en un **directorio dedicado**. Este comando baja el
+`compose.override.yaml` de este repo y, si la descarga fue bien, corre el `deploy.sh`
+de gh_runner — encadenados con `&&`. `deploy.sh` generará ahí `compose.yaml` y el plugin
+de Compose autofusiona el override al hacer `up -d`.
 
 ```bash
-# Descarga el deploy.sh de gh_runner y despliega la imagen del proyecto.
-# Por defecto deploy.sh hace bootstrap del entorno (instala podman + un proveedor de
-# compose y crea la machine si faltan); usa --no-bootstrap para gestionarlo tú.
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.sh)" -- \
-    --repo demeneghi/sherman-svelte \
-    --image ghcr.io/joseamador95/sherman-svelte-runner:latest \
-    --labels svelte \
-    --count 3 --up
+curl -fsSL -O https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/compose.override.yaml \
+  && sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.sh)" -- \
+       --repo demeneghi/sherman-svelte \
+       --image ghcr.io/joseamador95/sherman-svelte-runner:latest \
+       --labels sherman,self-hosted \
+       --count 3 --up
 ```
+
+> **Token.** `deploy.sh` necesita un **PAT** con *Administration: Read and write* sobre
+> `demeneghi/sherman-svelte` (con él acuña los registration-tokens). No va en el comando
+> a propósito: lo resuelve en orden `--token` → `$ACCESS_TOKEN` → `gh auth token` → y si
+> no, **te lo pregunta** (así no queda en el history). Para pasarlo sin interacción,
+> antepón `ACCESS_TOKEN=github_pat_…` o añade `--token github_pat_…`.
+>
+> **Labels.** GitHub ya añade `self-hosted`, `Linux` y la arquitectura solo; el label
+> propio del proyecto es **`sherman`** (aquí `self-hosted` va explícito por claridad).
+>
+> **Bootstrap.** Instala podman + un proveedor de compose y crea la machine si faltan
+> (`--no-bootstrap` para omitirlo). `curl -f` corta la cadena si la descarga falla, y
+> Compose se niega a arrancar si el YAML llega corrupto.
 
 **Cómo sube Verdaccio (importante).** `deploy.sh` genera `compose.yaml` y lo levanta
 con `up -d` **sin `-f`**. Con el **plugin de Compose v2** (`podman compose` /
@@ -48,8 +61,23 @@ alcanzable por nombre, sin `--network`.
 > podman compose -f compose.yaml -f compose.override.yaml up -d
 > ```
 
-En Windows usa `deploy.ps1` con
-`-Image ghcr.io/joseamador95/sherman-svelte-runner:latest -Labels svelte`.
+### Windows (PowerShell)
+
+Mismo flujo con `deploy.ps1`. El operador `&&` necesita **PowerShell 7+** (en 5.1 corre
+las dos instrucciones por separado). El token igual que en bash: `-Token`,
+`$env:ACCESS_TOKEN`, `gh auth token`, o te lo pregunta.
+
+```powershell
+$ovr = 'https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/compose.override.yaml'
+$dep = 'https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.ps1'
+
+Invoke-WebRequest -UseBasicParsing $ovr -OutFile compose.override.yaml &&
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing $dep).Content)) `
+    -Repo 'demeneghi/sherman-svelte' `
+    -Image 'ghcr.io/joseamador95/sherman-svelte-runner:latest' `
+    -Labels 'sherman,self-hosted' `
+    -Count 3 -Up
+```
 
 ## Mantenerlo al día
 
@@ -68,7 +96,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/mai
 
 Para aprovechar el runner y no pelear con el cache remoto de GitHub:
 
-- **Apunta el job al runner:** `runs-on: [self-hosted, linux, svelte]` (`svelte` = la label de `--labels`).
+- **Apunta el job al runner:** `runs-on: [self-hosted, linux, sherman]` (`sherman` = tu label de `--labels`).
 - **Quita `actions/cache` y `setup-node` con `cache: pnpm`.** El store de pnpm ya
   persiste en `_work` (local, mismo filesystem que `node_modules`). Esos pasos
   suben/bajan el store al cache de GitHub (Azure) — lento y redundante; son el
@@ -85,7 +113,7 @@ Para aprovechar el runner y no pelear con el cache remoto de GitHub:
 # .github/workflows/ci.yml (en el repo demeneghi/sherman-svelte)
 jobs:
   test:
-    runs-on: [self-hosted, linux, svelte]   # 'svelte' = la label del --labels
+    runs-on: [self-hosted, linux, sherman]   # 'sherman' = tu label del --labels
     steps:
       - uses: actions/checkout@v4
       - run: corepack enable
