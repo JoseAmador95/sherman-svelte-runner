@@ -1,0 +1,6 @@
+# Artefactos de bootstrap (se quedan en local, no forman parte del repo).
+*.tar.gz
+shermansvelterunnerkickoff.md
+
+# Cruft del SO.
+.DS_Store

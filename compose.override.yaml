@@ -1,0 +1,36 @@
+# compose.override.yaml — servicios/volúmenes EXTRA del proyecto.
+#
+# deploy.sh genera compose.yaml y lo levanta con `up -d` SIN pasar `-f`; por eso
+# el PROVEEDOR de compose v2 (`podman compose` / `docker compose`) AUTOFUSIONA
+# este compose.override.yaml del mismo directorio. No hay que tocarlo a mano ni
+# regenerarlo: gh_runner nunca lo pisa (lo posee el proyecto).
+#   ⚠️  El `podman-compose` LEGACY (Python) NO autofusiona overrides. En ese caso
+#       levanta con:  podman compose -f compose.yaml -f compose.override.yaml up -d
+#
+# La RED POR DEFECTO del proyecto hace a estos servicios alcanzables POR NOMBRE
+# desde los runners (p.ej. http://verdaccio:4873), así que NO hace falta --network.
+
+services:
+  # Registry npm pull-through: baja de npmjs UNA vez y cachea; lo comparten todos
+  # los runners del host. Acelera el arranque en frío sin el riesgo de corromper
+  # un store de pnpm compartido. Apunta los jobs con npm_config_registry.
+  verdaccio:
+    image: verdaccio/verdaccio:5
+    restart: always
+    ports:
+      - "4873:4873"        # opcional: exponer al host (para inspeccionar la UI)
+    volumes:
+      - verdaccio-storage:/verdaccio/storage
+
+  # Ejemplo de otro sidecar (descomenta si tus tests necesitan una base de datos):
+  # postgres:
+  #   image: postgres:16
+  #   restart: always
+  #   environment:
+  #     POSTGRES_PASSWORD: test
+  #   volumes:
+  #     - pg-data:/var/lib/postgresql/data
+
+volumes:
+  verdaccio-storage: {}
+  # pg-data: {}

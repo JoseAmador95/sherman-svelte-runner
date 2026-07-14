@@ -1,0 +1,8 @@
+# Nada se COPIa en la imagen; esto solo mantiene ligero el contexto de build.
+.git
+.gitignore
+.dockerignore
+.github/
+*.md
+*.tar.gz
+compose.override.yaml
