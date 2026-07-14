@@ -15,7 +15,11 @@ services:
   # los runners del host. Acelera el arranque en frío sin el riesgo de corromper
   # un store de pnpm compartido. Apunta los jobs con npm_config_registry.
   verdaccio:
-    image: verdaccio/verdaccio:5
+    # Imagen TOTALMENTE cualificada (docker.io/...): en podman/Fedora los nombres
+    # cortos disparan resolución multi-registro (o un prompt interactivo) y fallan
+    # —Docker Hub NO es el default como en docker—. Con docker.io/... anda igual en
+    # podman y en docker.
+    image: docker.io/verdaccio/verdaccio:5
     restart: always
     ports:
       - "4873:4873"        # opcional: exponer al host (para inspeccionar la UI)
@@ -24,7 +28,7 @@ services:
 
   # Ejemplo de otro sidecar (descomenta si tus tests necesitan una base de datos):
   # postgres:
-  #   image: postgres:16
+  #   image: docker.io/postgres:16
   #   restart: always
   #   environment:
   #     POSTGRES_PASSWORD: test
