@@ -20,19 +20,24 @@ con el toolchain del proyecto y sus servicios sidecar.
 
 ## Desplegar
 
-En una máquina del fleet, en un **directorio dedicado**, con el
-`compose.override.yaml` de este repo presente en ese directorio:
+En una máquina del fleet, en un **directorio dedicado**. Este comando baja el
+`compose.override.yaml` de este repo y, si la descarga fue bien, corre el `deploy.sh`
+de gh_runner — encadenados con `&&`. `deploy.sh` generará ahí `compose.yaml` y el plugin
+de Compose autofusiona el override al hacer `up -d`.
 
 ```bash
-# Descarga el deploy.sh de gh_runner y despliega la imagen del proyecto.
-# Por defecto deploy.sh hace bootstrap del entorno (instala podman + un proveedor de
-# compose y crea la machine si faltan); usa --no-bootstrap para gestionarlo tú.
-sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.sh)" -- \
-    --repo demeneghi/sherman-svelte \
-    --image ghcr.io/joseamador95/sherman-svelte-runner:latest \
-    --labels svelte \
-    --count 3 --up
+curl -fsSL -O https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/compose.override.yaml \
+  && sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.sh)" -- \
+       --repo demeneghi/sherman-svelte \
+       --image ghcr.io/joseamador95/sherman-svelte-runner:latest \
+       --labels svelte \
+       --count 3 --up
 ```
+
+> `deploy.sh` hace **bootstrap** del entorno por defecto (instala podman + un proveedor
+> de compose y crea la machine si faltan); usa `--no-bootstrap` para gestionarlo tú.
+> `curl -f` corta la cadena si la descarga falla, y Compose se niega a arrancar si el
+> YAML llega corrupto.
 
 **Cómo sube Verdaccio (importante).** `deploy.sh` genera `compose.yaml` y lo levanta
 con `up -d` **sin `-f`**. Con el **plugin de Compose v2** (`podman compose` /
