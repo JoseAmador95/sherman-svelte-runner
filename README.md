@@ -119,8 +119,14 @@ En **Settings → Secrets and variables → Actions** de este repo:
 |--------|--------|
 | `SHERMAN_PAT` | Fine-grained PAT de **demeneghi**, *Repository access* → **solo** `demeneghi/sherman-svelte`, *Permissions → Repository → Administration:* **Read-only**. Con solo lectura puede **listar** runners pero **no** registrarlos ni borrarlos. Ponle caducidad y rótalo. |
 | `TELEGRAM_BOT_TOKEN` | El bot que manda el aviso. |
-| `TELEGRAM_CHAT_ID` | Chat destino. |
-| `TELEGRAM_THREAD_ID` | Opcional; solo para grupos con temas. |
+| `TELEGRAM_CHAT_ID` | Chat destino, o **varios separados por coma** (ver abajo). |
+| `TELEGRAM_THREAD_ID` | Opcional; solo para grupos con temas, y solo si hay **un** destino. |
+
+**Avisar a varias personas.** Un **grupo** con el bot dentro es lo más cómodo: un solo id y añadir o
+quitar gente no toca los secretos. Si prefieres mensajes privados, `TELEGRAM_CHAT_ID` acepta una
+lista —`123456789,987654321`— y cada persona debe **haberle escrito antes al bot** (un bot no puede
+escribir primero). Si un destino falla, el envío sigue con los demás y el log dice cuál falló. Un
+destino puede fijar su tema con `id:hilo` (p. ej. `-1001234567890:12`).
 
 > ⚠️ **Este repo es público y su dueño es `JoseAmador95`.** GitHub no pasa los secrets a los PR de
 > forks, así que por ahí no se filtran, pero **quien tenga permiso de escritura puede leerlos**
