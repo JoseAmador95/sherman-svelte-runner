@@ -139,36 +139,100 @@ async function consultarRunners(repo, token) {
 	return (await res.json())?.runners ?? [];
 }
 
-async function enviarTelegram(texto) {
-	const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
-	const chatId = process.env.TELEGRAM_CHAT_ID?.trim();
-	if (!token || !chatId) {
-		console.warn('⚠️  Sin TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID: no se envía el mensaje.');
-		return;
+/**
+ * Resuelve los destinos del aviso. `TELEGRAM_CHAT_ID` admite una lista separada por comas, así que
+ * el mismo mensaje llega a varias personas sin montar un grupo.
+ *
+ * Formato de cada entrada: **`id`** o **`id:hilo`** (el sufijo es para grupos con temas; un chat
+ * normal no los tiene y Telegram rechaza el envío si le mandas un `message_thread_id` inexistente,
+ * por eso el tema se declara por destino). `TELEGRAM_THREAD_ID` se conserva y se aplica **solo con
+ * un único destino**: con varios no hay forma de saber a cuál pertenece ese tema.
+ *
+ * Mismo contrato que `scripts/telegram.mjs` del repo de la app; se duplica a propósito porque este
+ * repo no comparte código con aquel.
+ *
+ * @returns {{ chatId: string, hilo: string | null }[]}
+ */
+export function parsearDestinosTelegram(chatIdRaw, hiloGlobal = null) {
+	const destinos = String(chatIdRaw ?? '')
+		.split(',')
+		.map((entrada) => entrada.trim())
+		.filter(Boolean)
+		.map((entrada) => {
+			// `lastIndexOf` y no `split(':')`: los ids de grupo son negativos pero nunca llevan `:`,
+			// y así un `@canal_publico` sin tema tampoco se parte por error.
+			const sep = entrada.lastIndexOf(':');
+			const hilo = sep > 0 ? entrada.slice(sep + 1).trim() : '';
+			if (/^\d+$/.test(hilo)) {
+				return { chatId: entrada.slice(0, sep).trim(), hilo };
+			}
+			return { chatId: entrada, hilo: null };
+		})
+		.filter((destino) => destino.chatId.length > 0);
+
+	const global = String(hiloGlobal ?? '').trim();
+	if (global && destinos.length === 1 && !destinos[0].hilo) {
+		destinos[0].hilo = global;
 	}
-	const hilo = process.env.TELEGRAM_THREAD_ID?.trim();
+	return destinos;
+}
+
+/** Un envío. Devuelve `true` solo si Telegram lo aceptó; nunca lanza. */
+async function enviarAChat(token, destino, texto) {
 	try {
 		const res = await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
 			method: 'POST',
 			headers: { 'Content-Type': 'application/json' },
 			body: JSON.stringify({
-				chat_id: chatId,
+				chat_id: destino.chatId,
 				text: texto,
 				parse_mode: 'HTML',
 				disable_web_page_preview: true,
-				...(hilo ? { message_thread_id: Number(hilo) } : {})
+				...(destino.hilo ? { message_thread_id: Number(destino.hilo) } : {})
 			})
 		});
 		const json = await res.json().catch(() => null);
 		if (!json?.ok) {
-			console.error('⚠️  Telegram rechazó el mensaje:', json?.description ?? res.status);
-			return;
+			console.error(
+				`⚠️  Telegram rechazó el mensaje para ${destino.chatId}:`,
+				json?.description ?? res.status
+			);
+			return false;
 		}
+		return true;
 	} catch (error) {
-		console.error('⚠️  No se pudo contactar con Telegram:', error.message);
+		console.error(`⚠️  No se pudo contactar con Telegram para ${destino.chatId}:`, error.message);
+		return false;
+	}
+}
+
+async function enviarTelegram(texto) {
+	const token = process.env.TELEGRAM_BOT_TOKEN?.trim();
+	const hiloGlobal = process.env.TELEGRAM_THREAD_ID?.trim();
+	const destinos = parsearDestinosTelegram(process.env.TELEGRAM_CHAT_ID, hiloGlobal);
+
+	if (!token || destinos.length === 0) {
+		console.warn('⚠️  Sin TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID: no se envía el mensaje.');
 		return;
 	}
-	console.log('📨 Aviso enviado a Telegram.');
+	if (hiloGlobal && destinos.length > 1) {
+		console.warn(
+			'⚠️  TELEGRAM_THREAD_ID se ignora con varios destinos: declara el tema en el propio id («-1001234:12»).'
+		);
+	}
+
+	// En serie y no en paralelo: son dos o tres destinos, y así el log dice cuál falló sin mezclar.
+	let entregados = 0;
+	for (const destino of destinos) {
+		if (await enviarAChat(token, destino, texto)) entregados++;
+	}
+
+	if (entregados === 0) return;
+	console.log(
+		destinos.length === 1
+			? '📨 Aviso enviado a Telegram.'
+			: `📨 Aviso enviado a Telegram (${entregados}/${destinos.length} destinos).`
+	);
 }
 
 /** Estado previo ausente o corrupto = primera ronda; nunca revienta por eso. */
