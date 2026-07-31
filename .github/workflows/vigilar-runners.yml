@@ -1,0 +1,76 @@
+name: vigilar-runners
+
+# Revisa cada hora que los runners del fleet sigan en línea y avisa por Telegram cuando cambia el
+# estado. Complementa el job `elegir-runner` de `demeneghi/sherman-svelte`, que solo habla cuando
+# una corrida CAE a runners de pago: este cubre el «falta uno de siete» y, sobre todo, las noches
+# y fines de semana en los que nadie empuja código y la CI no corre.
+#
+# POR QUÉ VIVE EN ESTE REPO: es público, y en repos públicos los minutos de los runners estándar
+# de GitHub son gratis. El mismo cron en el repo de la app (privado) se facturaría cada hora.
+#
+# SECRETS (Settings → Secrets and variables → Actions):
+#   SHERMAN_PAT         Fine-grained de demeneghi, alcance SOLO `demeneghi/sherman-svelte`,
+#                       permiso **Administration: Read-only**. Con solo lectura puede listar los
+#                       runners pero NO registrarlos ni borrarlos: si el token se filtrase, lo peor
+#                       que permite es ver los nombres del fleet. Ponle caducidad y rótalo.
+#   TELEGRAM_BOT_TOKEN  Bot que manda el aviso.
+#   TELEGRAM_CHAT_ID    Chat destino.
+#   TELEGRAM_THREAD_ID  Opcional: solo para grupos con temas.
+#
+# VARIABLES (opcionales, con valor por defecto abajo):
+#   REPO_VIGILADO · CI_RUNNER_LABEL · RUNNERS_ESPERADOS
+
+on:
+  schedule:
+    # Cada hora en punto. Cambiar la cadencia es cambiar solo esta línea.
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  # Una ronda a la vez: dos en paralelo se pisarían la caché de estado y duplicarían el aviso.
+  group: vigilar-runners
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  vigilar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      REPO_VIGILADO: ${{ vars.REPO_VIGILADO || 'demeneghi/sherman-svelte' }}
+      CI_RUNNER_LABEL: ${{ vars.CI_RUNNER_LABEL || 'sherman' }}
+      RUNNERS_ESPERADOS: ${{ vars.RUNNERS_ESPERADOS || '7' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Estado de la ronda anterior, para avisar solo cuando algo CAMBIA. Se usa `actions/cache` y
+      # no una variable de repo porque así no hace falta ningún permiso de escritura; con el cron
+      # horario la entrada nunca llega a los 7 días de purga. La clave lleva `run_id` para que
+      # nunca acierte (el post-save guarda siempre lo fresco) y `restore-keys` recupera la última.
+      - name: Restaurar estado de la ronda anterior
+        uses: actions/cache@v4
+        with:
+          path: .estado-fleet.json
+          key: vigilar-runners-${{ github.run_id }}
+          restore-keys: |
+            vigilar-runners-
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Sin dependencias: el script solo usa `fetch` de Node 22.
+      - name: Revisar el fleet y avisar si cambió
+        env:
+          SHERMAN_PAT: ${{ secrets.SHERMAN_PAT }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+        run: |
+          node scripts/vigilar-runners.mjs \
+            --repo="$REPO_VIGILADO" \
+            --etiqueta="$CI_RUNNER_LABEL" \
+            --esperados="$RUNNERS_ESPERADOS" \
+            --estado=.estado-fleet.json
