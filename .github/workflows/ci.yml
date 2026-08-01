@@ -96,6 +96,20 @@ jobs:
           fi
           echo "ok: un canal roto falla en rojo"
 
+      # El comando del README lo encadena al despliegue, así que corre en cada
+      # re-deploy. Si no reusara lo guardado, te pediría el token cada vez.
+      - name: Re-ejecutarlo no vuelve a pedir nada
+        run: |
+          set -eu
+          export PATH="$AV/bin:$PATH"
+          # Sin banderas, sin entorno y sin poder preguntar: solo puede salir
+          # bien si toma los valores del fichero que escribió la vez anterior.
+          salida="$(sh scripts/configurar-avisos.sh --hooks "$AV/hooks" --conf "$AV/avisos.conf" --no-preguntar 2>&1)"
+          printf '%s\n' "$salida" | grep -q 'Reusando' || {
+            echo "FALLO: no reusó la configuración previa"; printf '%s\n' "$salida"; exit 1; }
+          grep -q "^TG_TOKEN='123456:ABC-DEF'$" "$AV/avisos.conf" || { echo "FALLO: perdió el token"; exit 1; }
+          echo "ok: re-ejecutable sin volver a preguntar"
+
       - name: No pisa un hook que ya hubieras ajustado
         run: |
           set -eu
