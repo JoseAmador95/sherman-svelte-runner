@@ -46,7 +46,23 @@ while [ "$#" -gt 0 ]; do
         --conf)             CONF="${2:?}"; shift 2 ;;
         --no-preguntar)     PREGUNTAR="no"; shift ;;
         --no-probar)        PROBAR="no"; shift ;;
-        -h|--help)          sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//' >&2; exit 0 ;;
+        -h|--help)
+            # Con `sh -c "$(curl …)"` el script no está en disco y $0 es "sh",
+            # así que la cabecera no se puede leer: resumen corto de respaldo.
+            if [ -r "$0" ]; then
+                sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//' >&2
+            else
+                info 'Uso: configurar-avisos.sh [opciones]'
+                info '  --hc-url URL            Ping de healthchecks.io (env: HC_URL)'
+                info '  --telegram-token TOKEN  Bot de Telegram          (env: TG_TOKEN)'
+                info '  --telegram-chat ID      Chat destino             (env: TG_CHAT)'
+                info '  --telegram-thread ID    Tema del grupo, opcional (env: TG_THREAD)'
+                info '  --hooks RUTA            Dir de hooks del vigía'
+                info '  --conf RUTA             Dónde guardar la configuración'
+                info '  --no-preguntar          No preguntar lo que falte'
+                info '  --no-probar             No mandar la prueba por cada canal'
+            fi
+            exit 0 ;;
         *) err "opción desconocida: $1 (usa --help)" ;;
     esac
 done
@@ -57,6 +73,23 @@ TG_CHAT="${TG_CHAT:-}"
 TG_THREAD="${TG_THREAD:-}"
 
 command -v curl >/dev/null 2>&1 || err "hace falta 'curl'."
+
+# ---- Reusar lo ya configurado ----------------------------------------------
+# Sin esto, volver a ejecutar (por ejemplo si el comando de despliegue lo
+# encadena) pediría el token OTRA VEZ en cada re-deploy. Precedencia final:
+# bandera > entorno > lo que ya había en el fichero > preguntar.
+_hc="$HC_URL"; _tt="$TG_TOKEN"; _tc="$TG_CHAT"; _th="$TG_THREAD"
+YA_HABIA="no"
+if [ -r "$CONF" ]; then
+    # shellcheck source=/dev/null
+    . "$CONF" || err "no pude leer $CONF (¿está corrupto?)."
+    YA_HABIA="si"
+fi
+[ -n "$_hc" ] && HC_URL="$_hc"
+[ -n "$_tt" ] && TG_TOKEN="$_tt"
+[ -n "$_tc" ] && TG_CHAT="$_tc"
+[ -n "$_th" ] && TG_THREAD="$_th"
+[ "$YA_HABIA" = "si" ] && info "Reusando lo que ya había en $CONF (una bandera o variable de entorno lo sustituye)."
 
 # ---- Preguntar lo que falte ------------------------------------------------
 # Igual que deploy.sh con el PAT: preguntar es el camino por defecto, para que

@@ -28,26 +28,41 @@ de gh_runner — encadenados con `&&`. `deploy.sh` generará ahí `compose.yaml`
 de Compose autofusiona el override al hacer `up -d`.
 
 ```bash
+# NINGÚN secreto va en el comando: te los pregunta al vuelo, así no quedan en el
+# historial del shell. Son dos: el PAT (al empezar) y, al final, la URL de ping
+# de healthchecks.io + el token del bot de Telegram para los avisos.
+
 curl -fsSL -O https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/compose.override.yaml \
   && sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.sh)" -- \
        --repo demeneghi/sherman-svelte \
        --image ghcr.io/joseamador95/sherman-svelte-runner:latest \
        --labels sherman,self-hosted \
-       --count 3 --up
+       --count 3 --vigilar --up \
+  && sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/scripts/configurar-avisos.sh)"
 ```
 
+Tres tramos encadenados con `&&`: baja el `compose.override.yaml`, despliega los runners
+con el vigía puesto (**`--vigilar`**, ver [Vigilancia del fleet](#vigilancia-del-fleet)), y
+configura por dónde te avisa. **Es re-ejecutable**: en la segunda pasada reusa la
+configuración de avisos que ya escribió y no vuelve a preguntarte nada.
+
 > **Token.** `deploy.sh` necesita un **PAT** con *Administration: Read and write* sobre
-> `demeneghi/sherman-svelte` (con él acuña los registration-tokens). No va en el comando
-> a propósito: lo resuelve en orden `--token` → `$ACCESS_TOKEN` → `gh auth token` → y si
-> no, **te lo pregunta** (así no queda en el history). Para pasarlo sin interacción,
-> antepón `ACCESS_TOKEN=github_pat_…` o añade `--token github_pat_…`.
+> `demeneghi/sherman-svelte` (con él acuña los registration-tokens). **Por eso el comando
+> no lleva `--token`**: lo resuelve en orden `--token` → `$ACCESS_TOKEN` → `gh auth token`
+> → y si no, **te lo pregunta**, para que no quede en el history. Para pasarlo sin
+> interacción, antepón `ACCESS_TOKEN=github_pat_…` o añade `--token github_pat_…`.
 >
 > **Labels.** GitHub ya añade `self-hosted`, `Linux` y la arquitectura solo; el label
 > propio del proyecto es **`sherman`** (aquí `self-hosted` va explícito por claridad).
+> `deploy.sh` añade además `host:<hostname>`, para saber en qué máquina vive cada runner.
 >
 > **Bootstrap.** Instala podman + un proveedor de compose y crea la machine si faltan
 > (`--no-bootstrap` para omitirlo). `curl -f` corta la cadena si la descarga falla, y
 > Compose se niega a arrancar si el YAML llega corrupto.
+>
+> **Sin avisos, si prefieres.** Quita el último tramo y `--vigilar`: los runners se
+> despliegan igual. Pero entonces vuelves a no enterarte de que el fleet se cayó, que es
+> justo lo que costó un día de trabajo el 1 de agosto.
 
 **Cómo sube Verdaccio (importante).** `deploy.sh` genera `compose.yaml` y lo levanta
 con `up -d` **sin `-f`**. Con el **plugin de Compose v2** (`podman compose` /
@@ -78,7 +93,14 @@ Invoke-WebRequest -UseBasicParsing $ovr -OutFile compose.override.yaml &&
     -Repo 'demeneghi/sherman-svelte' `
     -Image 'ghcr.io/joseamador95/sherman-svelte-runner:latest' `
     -Labels 'sherman,self-hosted' `
-    -Count 3 -Up
+    -Count 3 -Vigilar -Up
+```
+
+Los **avisos** se configuran aparte en Windows: `configurar-avisos.sh` es un script POSIX y lo
+ejecuta `sh.exe` de Git Bash, el mismo requisito que ya tiene el vigía ahí.
+
+```powershell
+sh.exe -c "$(Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/scripts/configurar-avisos.sh' | Select-Object -ExpandProperty Content)"
 ```
 
 ## Mantenerlo al día
@@ -182,21 +204,14 @@ hablar con GitHub (figura *online* en el registro y no toma un solo job), el con
 el **reloj desfasado** —la causa raíz del incidente del 1 de agosto, en que un host iba 32 minutos
 atrasado y sus runners quedaron inservibles durante horas—.
 
-Se instala añadiendo **`--vigilar`** al comando de despliegue:
-
-```bash
-curl -fsSL -O https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/compose.override.yaml \
-  && sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.sh)" -- \
-       --repo demeneghi/sherman-svelte \
-       --image ghcr.io/joseamador95/sherman-svelte-runner:latest \
-       --labels sherman,self-hosted \
-       --count 3 --vigilar --up
-```
-
-Eso deja el temporizador puesto y los hooks de aviso **como ejemplos**, sin activar: el vigía ya
-vigila, pero todavía no sabe por dónde avisarte.
+Lo instala el **`--vigilar`** del comando de [Desplegar](#desplegar), que deja el temporizador
+puesto y los hooks de aviso **como ejemplos**, sin activar: el vigía ya vigila, pero todavía no
+sabe por dónde avisarte. De eso se encarga el último tramo de ese mismo comando.
 
 #### Configurar los avisos (Telegram y healthchecks.io)
+
+Va incluido en el comando de despliegue. Para (re)configurarlos por separado —cambiar de chat,
+rotar el token del bot, añadir un canal— es el mismo script suelto:
 
 ```bash
 sh scripts/configurar-avisos.sh
@@ -204,6 +219,7 @@ sh scripts/configurar-avisos.sh
 
 Te pregunta la URL de ping y el token del bot, escribe `~/.config/gh-runner/avisos.conf`
 (**chmod 600**), activa los hooks que correspondan y **manda una prueba por cada canal**.
+Reusa lo que ya hubiera guardado, así que solo tienes que responder lo que quieras cambiar.
 
 Esa prueba es el motivo de que exista el script. Un aviso mal cableado **no falla: calla** — y
 callar es exactamente lo que hace un fleet sano. Sin probarlo al instalarlo, el fallo aparece la
