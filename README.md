@@ -104,12 +104,12 @@ un mensaje, no cuarenta.
 los minutos de los runners de GitHub son gratis; en `demeneghi/sherman-svelte`, que es privado, el
 mismo cron se facturaría cada hora.
 
-Se reparte el trabajo con el job `elegir-runner` del repo de la app:
+**Es el único aviso, y por eso importa.** La CI de la app apunta al fleet **fijo, sin respaldo de
+pago**: con el fleet caído sus jobs se quedan **en cola** en vez de irse a `ubuntu-latest`, así que
+nadie se entera por la factura ni por una corrida roja. Enterarse es trabajo de este vigía.
 
-| Quién | Cuándo avisa | Por qué ahí |
-|-------|--------------|-------------|
-| `elegir-runner` (repo de la app) | Una corrida **cae a runners de pago** | Ya está corriendo: el aviso sale gratis y llega en el momento en que empieza a costar dinero. |
-| `vigilar-runners` (aquí) | **Falta** algún runner aunque el fleet siga sirviendo, o **vuelven** todos | Cubre noches y fines de semana, cuando nadie empuja código y la CI no corre. |
+Ir por reloj y no por corrida es justo lo que lo hace útil: cubre noches y fines de semana, cuando
+nadie empuja código y la CI no corre — que es cuando el fleet se cae sin que nadie mire.
 
 ### Configuración
 
@@ -153,15 +153,15 @@ vigía lo registra y sale en verde **sin** avisar: un mal minuto de GitHub no es
 
 ## En los workflows de Sherman-svelte
 
-> **Ya está cableado.** `ci.yml` de `demeneghi/sherman-svelte` no fija `runs-on` a mano: un job
-> `elegir-runner` (`scripts/elegir-runner.mjs`) consulta la API, publica
-> `["self-hosted","linux","sherman"]` si hay al menos un runner **en línea** —ocupado o no, porque
-> esperar en la cola del fleet es gratis y caer a `ubuntu-latest` cuesta— y cae al respaldo de pago
-> solo cuando el fleet no responde, avisando por Telegram. Lo de abajo es el porqué de cada pieza.
+> **Ya está cableado.** `ci.yml` y `e2e-suite.yml` de `demeneghi/sherman-svelte` fijan
+> `runs-on: [self-hosted, linux, sherman]` en **todos** sus jobs, sin selector ni respaldo de pago.
+> Hubo un job que elegía runner por corrida y se retiró: costaba un minuto facturado en cada corrida
+> por cubrir solo el caso «el fleet ya estaba apagado al arrancar». Con el fleet caído los jobs se
+> **encolan**, y de eso avisa el vigía de arriba. Lo de abajo es el porqué de cada pieza.
 
 Para aprovechar el runner y no pelear con el cache remoto de GitHub:
 
-- **Apunta el job al runner:** `runs-on: [self-hosted, linux, sherman]` (`sherman` = tu label de `--labels`), o al selector con respaldo si el pipeline no puede quedarse en cola.
+- **Apunta el job al runner:** `runs-on: [self-hosted, linux, sherman]` (`sherman` = tu label de `--labels`). Ojo: sin respaldo, un pipeline que **no** pueda quedarse en cola (un aviso que tiene que llegar sí o sí) es justo el que debe quedarse en `ubuntu-latest`.
 - **Quita `actions/cache` y `setup-node` con `cache: pnpm`.** El store de pnpm ya
   persiste en `_work` (local, mismo filesystem que `node_modules`). Esos pasos
   suben/bajan el store al cache de GitHub (Azure) — lento y redundante; son el
