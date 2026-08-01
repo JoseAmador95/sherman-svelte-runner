@@ -6,10 +6,11 @@
  * públicos los minutos de los runners estándar de GitHub son gratis. Un cron horario cuesta cero.
  * El repo de la app es privado, así que ahí el mismo cron se facturaría.
  *
- * Reparto de responsabilidades con `elegir-runner.mjs` (repo de la app):
- *  · aquel avisa cuando una corrida CAE a runners de pago — lo urgente, porque cuesta dinero.
- *  · este avisa cuando FALTA algún runner aunque el fleet siga dando servicio, y cubre los huecos
- *    sin actividad (noches y fines de semana, cuando nadie empuja código y la CI no corre).
+ * Es el ÚNICO aviso de fleet caído: la CI de la app apunta al fleet con `runs-on` fijo, sin
+ * respaldo en runners de pago, así que un fleet que no responde deja sus jobs EN COLA en vez de
+ * mandarlos a `ubuntu-latest`. No hay factura ni corrida roja que lo delate. Y al ir por reloj y no
+ * por corrida, cubre los huecos sin actividad (noches y fines de semana, cuando nadie empuja código
+ * y la CI no corre), que es cuando el fleet se cae sin que nadie mire.
  *
  * ANTI-SPAM: solo habla cuando el conjunto de runners caídos CAMBIA respecto a la ronda anterior
  * (incluido el «ya volvieron todos»). El estado previo se pasa por `--estado-previo=<ruta>` y se

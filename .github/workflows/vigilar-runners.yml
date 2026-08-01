@@ -1,9 +1,15 @@
 name: vigilar-runners
 
 # Revisa cada hora que los runners del fleet sigan en línea y avisa por Telegram cuando cambia el
-# estado. Complementa el job `elegir-runner` de `demeneghi/sherman-svelte`, que solo habla cuando
-# una corrida CAE a runners de pago: este cubre el «falta uno de siete» y, sobre todo, las noches
-# y fines de semana en los que nadie empuja código y la CI no corre.
+# estado.
+#
+# ES EL ÚNICO AVISO DE FLEET CAÍDO, y por eso importa. La CI de `demeneghi/sherman-svelte` apunta
+# al fleet con `runs-on` FIJO, sin respaldo en runners de pago: si el fleet no responde, sus jobs
+# se quedan EN COLA (GitHub los descarta a las 24 h) en vez de irse a `ubuntu-latest`. No hay
+# factura ni corrida roja que delate el problema — solo este cron.
+#
+# Además, al ir por reloj y no por corrida, cubre las noches y fines de semana en los que nadie
+# empuja código y la CI no corre, que es cuando el fleet se cae sin que nadie mire.
 #
 # POR QUÉ VIVE EN ESTE REPO: es público, y en repos públicos los minutos de los runners estándar
 # de GitHub son gratis. El mismo cron en el repo de la app (privado) se facturaría cada hora.
