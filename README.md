@@ -12,6 +12,7 @@ con el toolchain del proyecto y sus servicios sidecar.
 | `compose.override.yaml` | Verdaccio (registry npm pull-through) compartido por los runners del host, alcanzable como `http://verdaccio:4873`. |
 | `.github/workflows/build-image.yml` | Build multi-arch (amd64+arm64) a `ghcr.io/<owner>/sherman-svelte-runner:latest`, con `schedule` diario para heredar los arreglos del base. |
 | `.github/workflows/vigilar-runners.yml` + `scripts/vigilar-runners.mjs` | Vigía horario del fleet: avisa por Telegram cuando un runner se cae o vuelve. Ver [Vigilancia del fleet](#vigilancia-del-fleet). |
+| `scripts/configurar-avisos.sh` | Deja listos los avisos del vigía **del host** (gh_runner) en una máquina: escribe su configuración, activa los hooks y **prueba cada canal**. |
 
 > **Nombre del repo / owner.** Hoy el remoto es `JoseAmador95/svelte-runner`; hay que
 > **renombrarlo a `sherman-svelte-runner`** (el nombre de la imagen sale de
@@ -95,6 +96,22 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/mai
 
 ## Vigilancia del fleet
 
+**Por qué importa tanto.** La CI de la app apunta al fleet **fijo, sin respaldo de pago**: con el
+fleet caído sus jobs se quedan **en cola** en vez de irse a `ubuntu-latest`, así que nadie se entera
+por la factura ni por una corrida roja. Enterarse es trabajo de la vigilancia, y de nada más.
+
+Son **dos capas**, y cada una ve lo que la otra no:
+
+| | Dónde corre | Cada | Lo que solo ve ella |
+|---|---|---|---|
+| **Vigía de GitHub** (`vigilar-runners.yml`) | Actions | 1 h | Un runner registrado **sin la etiqueta** del fleet: vivo, pero sin tomar jobs. Y cruza **todas** las máquinas de una vez |
+| **Vigía del host** (`vigilar.sh`, de gh_runner) | cada máquina | 5 min | El runner **atascado** y el **reloj desfasado** — invisibles desde GitHub, donde el runner figura *online*. Y, por ausencia de latido, que la **máquina esté apagada** |
+
+Ninguna sustituye a la otra. La de GitHub mira el fleet **desde fuera** y por eso ve el registro
+entero; la del host mira **desde dentro** y por eso ve el proceso.
+
+### Capa 1 — Vigía de GitHub (este repo)
+
 `vigilar-runners.yml` corre **cada hora** y avisa por **Telegram** cuando cambia el estado del
 fleet: alguno se cayó, alguno desapareció del registro, o volvieron todos. Solo habla cuando el
 estado **cambia** respecto a la ronda anterior, así que una máquina apagada el fin de semana manda
@@ -104,14 +121,10 @@ un mensaje, no cuarenta.
 los minutos de los runners de GitHub son gratis; en `demeneghi/sherman-svelte`, que es privado, el
 mismo cron se facturaría cada hora.
 
-**Es el único aviso, y por eso importa.** La CI de la app apunta al fleet **fijo, sin respaldo de
-pago**: con el fleet caído sus jobs se quedan **en cola** en vez de irse a `ubuntu-latest`, así que
-nadie se entera por la factura ni por una corrida roja. Enterarse es trabajo de este vigía.
-
 Ir por reloj y no por corrida es justo lo que lo hace útil: cubre noches y fines de semana, cuando
 nadie empuja código y la CI no corre — que es cuando el fleet se cae sin que nadie mire.
 
-### Configuración
+#### Configuración
 
 En **Settings → Secrets and variables → Actions** de este repo:
 
@@ -139,7 +152,7 @@ Variables opcionales (con valor por defecto): `REPO_VIGILADO` (`demeneghi/sherma
 `CI_RUNNER_LABEL` (`sherman`), `RUNNERS_ESPERADOS` (`7`). `RUNNERS_ESPERADOS` es lo que detecta un
 runner que **desapareció del listado** (contenedor muerto del todo), no solo uno `offline`.
 
-### Probarlo
+#### Probarlo
 
 Desde **Actions → vigilar-runners → Run workflow**, marcando la casilla **«Mandar el aviso aunque el
 estado no haya cambiado»**.
@@ -161,6 +174,78 @@ Añade `--forzar` para ver el mensaje que mandaría aunque no haya cambios.
 
 Cambiar la cadencia es cambiar la línea del `cron` en el workflow. Si la API de GitHub falla, el
 vigía lo registra y sale en verde **sin** avisar: un mal minuto de GitHub no es un fleet caído.
+
+### Capa 2 — Vigía del host (en cada máquina)
+
+Detecta lo que desde GitHub **no se ve**: el runner que sigue `Up` pero **atascado** sin poder
+hablar con GitHub (figura *online* en el registro y no toma un solo job), el contenedor ausente, y
+el **reloj desfasado** —la causa raíz del incidente del 1 de agosto, en que un host iba 32 minutos
+atrasado y sus runners quedaron inservibles durante horas—.
+
+Se instala añadiendo **`--vigilar`** al comando de despliegue:
+
+```bash
+curl -fsSL -O https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/compose.override.yaml \
+  && sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.sh)" -- \
+       --repo demeneghi/sherman-svelte \
+       --image ghcr.io/joseamador95/sherman-svelte-runner:latest \
+       --labels sherman,self-hosted \
+       --count 3 --vigilar --up
+```
+
+Eso deja el temporizador puesto y los hooks de aviso **como ejemplos**, sin activar: el vigía ya
+vigila, pero todavía no sabe por dónde avisarte.
+
+#### Configurar los avisos (Telegram y healthchecks.io)
+
+```bash
+sh scripts/configurar-avisos.sh
+```
+
+Te pregunta la URL de ping y el token del bot, escribe `~/.config/gh-runner/avisos.conf`
+(**chmod 600**), activa los hooks que correspondan y **manda una prueba por cada canal**.
+
+Esa prueba es el motivo de que exista el script. Un aviso mal cableado **no falla: calla** — y
+callar es exactamente lo que hace un fleet sano. Sin probarlo al instalarlo, el fallo aparece la
+noche que algo se rompe, que es cuando ya no sirve de nada.
+
+Para automatizar varias máquinas, los valores también salen del entorno:
+
+```bash
+HC_URL=… TG_TOKEN=… TG_CHAT=… sh scripts/configurar-avisos.sh --no-preguntar
+```
+
+> ⚠️ Por defecto **pregunta** en vez de aceptar banderas, igual que `deploy.sh` con el PAT: así el
+> token no queda en el historial del shell. Con `--no-preguntar` sí queda — úsalo solo desde un
+> script de aprovisionamiento.
+
+Una vez configurada una máquina, replicarla es copiar **un solo fichero**:
+
+```bash
+scp ~/.config/gh-runner/avisos.conf otro-host:~/.config/gh-runner/
+```
+
+Los hooks lo leen solos; no hay que editarlos en cada host.
+
+> **Los secretos no viven en este repo, y no pueden: es público.** Los `TELEGRAM_*` de
+> *Settings → Secrets* son para la **capa 1** (Actions) y GitHub no se los puede entregar a una
+> máquina. El repo aporta la lógica; el secreto lo pones tú en el host, una vez.
+
+#### Qué avisos llegan
+
+Solo cuando el estado **cambia**, nunca en cada ronda:
+
+| Cuándo | Mensaje |
+|---|---|
+| Primera ronda tras instalar | 🔎 **Vigilancia activa** — confirma que el cableado funciona |
+| Algo se rompe | 🔴 **Runners en problemas** + qué runner y por qué |
+| Vuelve a estar bien | ✅ **Runners de vuelta** |
+| Nada cambió | *silencio* |
+
+Y el aviso que **no** puede llegar por Telegram: que la máquina esté apagada. Nadie manda un mensaje
+desde un host muerto. Eso lo cubre healthchecks.io **por ausencia de latido** — el host hace ping
+cada ronda y es el servicio quien avisa cuando deja de llegar. Con rondas de 5 min, pon *period* ~15
+min y *grace* ~10 en el check.
 
 ## En los workflows de Sherman-svelte
 
