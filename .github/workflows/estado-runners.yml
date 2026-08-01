@@ -1,0 +1,50 @@
+name: estado-runners
+
+# Foto del fleet a petición: qué runners hay, cuáles están en línea y cuáles están tomando trabajo.
+# El resultado se escribe en el RESUMEN del job, no por Telegram.
+#
+# POR QUÉ ESTÁ SEPARADO DEL VIGÍA: son dos preguntas distintas. `vigilar-runners` responde «¿ha
+# cambiado algo desde la última ronda?» y su salida es un mensaje al móvil; este responde «¿qué pasa
+# ahora mismo?» y su salida es una tabla. Meter las dos en un workflow obligaría a ramificar el
+# camino de alerta, que es justo el que no puede romperse.
+#
+# SOLO `workflow_dispatch`, sin cron: nadie necesita esta foto cada hora, y de lo que cambia ya
+# avisa el vigía.
+#
+# NOTA DE SEGURIDAD (este repo es PÚBLICO): los logs y el resumen de un repo público los puede leer
+# cualquiera, así que esta tabla publica los NOMBRES de tus runners y cuándo están caídos. Es
+# metadato de baja sensibilidad y se asume a cambio de no repartir una segunda copia del PAT: el
+# `SHERMAN_PAT` ya vive aquí para el vigía, y duplicarlo en el repo privado de la app sería peor.
+# Lo que NO se asume nunca: este repo no tiene runners self-hosted enganchados y sus workflows
+# corren en `ubuntu-latest`. Es lo que impide que un PR de un fork ejecute código en tus máquinas.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  estado:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      REPO_VIGILADO: ${{ vars.REPO_VIGILADO || 'demeneghi/sherman-svelte' }}
+      CI_RUNNER_LABEL: ${{ vars.CI_RUNNER_LABEL || 'sherman' }}
+      RUNNERS_ESPERADOS: ${{ vars.RUNNERS_ESPERADOS || '7' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Sin dependencias: el script solo usa `fetch` de Node 22.
+      - name: Foto del fleet
+        env:
+          SHERMAN_PAT: ${{ secrets.SHERMAN_PAT }}
+        run: |
+          node scripts/estado-runners.mjs \
+            --repo="$REPO_VIGILADO" \
+            --etiqueta="$CI_RUNNER_LABEL" \
+            --esperados="$RUNNERS_ESPERADOS"

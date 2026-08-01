@@ -144,7 +144,8 @@ export function construirMensaje({ repo, estado, esperados, faltan, sano, forzad
 	return lineas.join('\n');
 }
 
-async function consultarRunners(repo, token) {
+/** Exportada para que `estado-runners.mjs` no duplique la llamada ni el manejo de errores. */
+export async function consultarRunners(repo, token) {
 	const res = await fetch(`https://api.github.com/repos/${repo}/actions/runners?per_page=100`, {
 		headers: {
 			Accept: 'application/vnd.github+json',
