@@ -131,7 +131,60 @@ if [ -n "$TG_TOKEN" ]; then
     esac
 fi
 
-# ---- Escribir la configuración --------------------------------------------
+# Se comprueba ANTES de probar los canales: no tiene sentido mandar mensajes de
+# prueba para acabar fallando porque el vigía ni siquiera está instalado.
+[ -d "$HOOKS_DIR" ] || err "no existe $HOOKS_DIR.
+       Instala antes el vigía:  sh deploy.sh … --vigilar   (o pasa --hooks RUTA)"
+
+# ---- Probar ANTES de guardar nada ------------------------------------------
+# El orden importa. Guardar primero y probar después dejaría en disco una
+# configuración que el propio script acaba de declarar rota, y como al re-
+# ejecutarse reusa lo guardado, ese valor malo quedaría pegado: un typo en la URL
+# sobreviviría a los siguientes intentos.
+#
+# Probando primero, un intento fallido no toca nada: si ya tenías una
+# configuración que funcionaba, sigue intacta.
+_fallos=0
+if [ "$PROBAR" = "si" ]; then
+    info ""
+    info "Probando los canales..."
+
+    if [ -n "$HC_URL" ]; then
+        # Ping normal, NUNCA /fail: una prueba no debe dejar el check en rojo ni
+        # despertar a nadie. Basta con que healthchecks.io lo registre.
+        if curl -fsS -m 15 --retry 2 -X POST -H 'Content-Type: text/plain; charset=utf-8' \
+                --data-raw 'Prueba de configurar-avisos.sh: el canal funciona.' \
+                "$HC_URL" >/dev/null 2>&1; then
+            info "  healthchecks.io: OK (míralo en el panel del check)."
+        else
+            info "  healthchecks.io: FALLÓ. Revisa la URL de ping."
+            _fallos=$(( _fallos + 1 ))
+        fi
+    fi
+
+    if [ -n "$TG_TOKEN" ]; then
+        _host="$(hostname 2>/dev/null || echo host)"
+        set -- --data-urlencode "chat_id=${TG_CHAT}" \
+               --data-urlencode "text=🔧 Avisos configurados en ${_host%%.*}. Este es el canal por el que llegarán las alertas del fleet."
+        [ -n "$TG_THREAD" ] && set -- "$@" --data-urlencode "message_thread_id=${TG_THREAD}"
+        if curl -fsS -m 15 --retry 2 -X POST "$@" \
+                "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" >/dev/null 2>&1; then
+            info "  Telegram: OK (mira el chat)."
+        else
+            info "  Telegram: FALLÓ. Token, chat id, o el bot no puede publicar en ese chat."
+            info "    Recuerda: un bot no puede escribir primero a una persona; en grupo, dale permiso de publicar."
+            _fallos=$(( _fallos + 1 ))
+        fi
+    fi
+
+    if [ "$_fallos" -gt 0 ]; then
+        info ""
+        [ "$YA_HABIA" = "si" ] && info "No he tocado $CONF: lo que tenías sigue como estaba."
+        err "$_fallos canal(es) no funcionan. Corrige y vuelve a ejecutar."
+    fi
+fi
+
+# ---- Guardar la configuración ----------------------------------------------
 # Entre comillas simples y escapando las que traiga el valor: los hooks hacen
 # `.` sobre este fichero, así que un valor sin escapar sería ejecutable.
 entrecomillar() {
@@ -150,14 +203,12 @@ mkdir -p "$(dirname "$CONF")"
     :
 } > "$CONF"
 chmod 600 "$CONF"
+info ""
 info "Escrito $CONF (chmod 600)."
 
 # ---- Activar los hooks -----------------------------------------------------
 # Los hooks los instala `deploy.sh --vigilar` con sufijo .ejemplo, para que no
 # se ejecuten a medio configurar. Activarlos es quitarles el sufijo.
-[ -d "$HOOKS_DIR" ] || err "no existe $HOOKS_DIR.
-       Instala antes el vigía:  sh deploy.sh … --vigilar   (o pasa --hooks RUTA)"
-
 activar() {  # $1 = nombre del hook
     _act="${HOOKS_DIR}/$1"
     if [ -e "$_act" ]; then
@@ -174,50 +225,10 @@ info "Hooks en $HOOKS_DIR:"
 [ -n "$HC_URL" ]   && activar 10-healthchecks.sh
 [ -n "$TG_TOKEN" ] && activar 20-telegram.sh
 
-# ---- Probar de verdad ------------------------------------------------------
-# Un canal mal cableado calla igual que un fleet sano: si no se prueba ahora, el
-# fallo aparece la noche que algo se rompe.
-if [ "$PROBAR" != "si" ]; then
-    info ""
-    info "Listo (sin probar). Para comprobarlo: systemctl --user start gh-runner-vigilar.service"
-    exit 0
-fi
-
 info ""
-info "Probando los canales..."
-_fallos=0
-
-if [ -n "$HC_URL" ]; then
-    # Ping normal, NUNCA /fail: una prueba no debe dejar el check en rojo ni
-    # despertar a nadie. Basta con que healthchecks.io lo registre.
-    if curl -fsS -m 15 --retry 2 -X POST -H 'Content-Type: text/plain; charset=utf-8' \
-            --data-raw 'Prueba de configurar-avisos.sh: el canal funciona.' \
-            "$HC_URL" >/dev/null 2>&1; then
-        info "  healthchecks.io: OK (míralo en el panel del check)."
-    else
-        info "  healthchecks.io: FALLÓ. Revisa la URL de ping."
-        _fallos=$(( _fallos + 1 ))
-    fi
+if [ "$PROBAR" = "si" ]; then
+    info "Todo listo. El vigía usará estos canales en su próxima ronda."
+else
+    info "Listo (sin probar los canales)."
 fi
-
-if [ -n "$TG_TOKEN" ]; then
-    _host="$(hostname 2>/dev/null || echo host)"
-    set -- --data-urlencode "chat_id=${TG_CHAT}" \
-           --data-urlencode "text=🔧 Avisos configurados en ${_host%%.*}. Este es el canal por el que llegarán las alertas del fleet."
-    [ -n "$TG_THREAD" ] && set -- "$@" --data-urlencode "message_thread_id=${TG_THREAD}"
-    if curl -fsS -m 15 --retry 2 -X POST "$@" \
-            "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" >/dev/null 2>&1; then
-        info "  Telegram: OK (mira el chat)."
-    else
-        info "  Telegram: FALLÓ. Token, chat id, o el bot no puede publicar en ese chat."
-        info "    Recuerda: un bot no puede escribir primero a una persona; en grupo, dale permiso de publicar."
-        _fallos=$(( _fallos + 1 ))
-    fi
-fi
-
-info ""
-if [ "$_fallos" -gt 0 ]; then
-    err "$_fallos canal(es) no funcionan. Corrige y vuelve a ejecutar."
-fi
-info "Todo listo. El vigía usará estos canales en su próxima ronda."
-info "Para forzar una ahora:  systemctl --user start gh-runner-vigilar.service"
+info "Para forzar una ronda ahora:  systemctl --user start gh-runner-vigilar.service"
