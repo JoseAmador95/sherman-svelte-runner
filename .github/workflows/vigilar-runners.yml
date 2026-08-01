@@ -31,6 +31,11 @@ on:
     # Cada hora en punto. Cambiar la cadencia es cambiar solo esta línea.
     - cron: '0 * * * *'
   workflow_dispatch:
+    inputs:
+      forzar:
+        description: 'Mandar el aviso aunque el estado no haya cambiado (sirve para probar que los secretos funcionan)'
+        type: boolean
+        default: false
 
 concurrency:
   # Una ronda a la vez: dos en paralelo se pisarían la caché de estado y duplicarían el aviso.
@@ -74,9 +79,14 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_THREAD_ID: ${{ secrets.TELEGRAM_THREAD_ID }}
+        # `inputs.forzar` solo existe en `workflow_dispatch`; en el cron es nulo, o sea falso, y la
+        # expresión se queda en cadena vacía. La rama VERDADERA devuelve texto no vacío a propósito:
+        # en las expresiones de Actions la cadena vacía es *falsy*, así que un `cond && '' || 'x'`
+        # colapsaría siempre a 'x'. Aquí el orden es el bueno y no hay trampa.
         run: |
           node scripts/vigilar-runners.mjs \
             --repo="$REPO_VIGILADO" \
             --etiqueta="$CI_RUNNER_LABEL" \
             --esperados="$RUNNERS_ESPERADOS" \
-            --estado=.estado-fleet.json
+            --estado=.estado-fleet.json \
+            ${{ inputs.forzar && '--forzar' || '' }}

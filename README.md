@@ -141,12 +141,23 @@ runner que **desapareció del listado** (contenedor muerto del todo), no solo un
 
 ### Probarlo
 
-Desde **Actions → vigilar-runners → Run workflow**, o en local sin enviar nada:
+Desde **Actions → vigilar-runners → Run workflow**, marcando la casilla **«Mandar el aviso aunque el
+estado no haya cambiado»**.
+
+Esa casilla es la que hace útil el disparo manual. Sin ella el anti-spam se aplica igual, así que si
+el fleet está como en la ronda anterior el job sale **verde y en silencio** — y eso no se distingue de
+tener los secretos mal puestos. Con la casilla marcada llega el mensaje sí o sí, y si lo lees, el
+cableado funciona. No descoloca nada: el estado se registra igual, así que la ronda siguiente vuelve a
+comparar con normalidad.
+
+En local, sin enviar nada:
 
 ```bash
 SHERMAN_PAT=github_pat_… node scripts/vigilar-runners.mjs \
   --repo=demeneghi/sherman-svelte --esperados=7 --dry-run
 ```
+
+Añade `--forzar` para ver el mensaje que mandaría aunque no haya cambios.
 
 Cambiar la cadencia es cambiar la línea del `cron` en el workflow. Si la API de GitHub falla, el
 vigía lo registra y sale en verde **sin** avisar: un mal minuto de GitHub no es un fleet caído.

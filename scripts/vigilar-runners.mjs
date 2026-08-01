@@ -71,11 +71,17 @@ export function estadoFleet(runners, etiqueta) {
  * (el contenedor murió del todo y se desregistró) es tan preocupante como uno `offline`, y mirando
  * solo `caidos` pasaría inadvertido.
  */
-export function decidirAviso({ estado, esperados, previo }) {
+export function decidirAviso({ estado, esperados, previo, forzar = false }) {
 	const faltan = esperados > 0 ? Math.max(0, esperados - estado.total) : 0;
 	const sano = estado.caidos.length === 0 && faltan === 0 && estado.online > 0;
 	const huella = JSON.stringify({ caidos: estado.caidos, total: estado.total });
 	const primeraRonda = previo == null;
+
+	// `forzar` salta TODO el anti-spam, y esa es justo su razón de ser: sin él, lanzar el vigía a
+	// mano para comprobar que los secretos funcionan devuelve un job verde y silencio, que es
+	// indistinguible de tenerlos mal puestos. Solo cambia si se HABLA; el estado se registra igual,
+	// así que una comprobación manual no descoloca el anti-spam de la siguiente ronda.
+	if (forzar) return { avisar: true, sano, huella, faltan };
 
 	if (!primeraRonda && previo.huella === huella) return { avisar: false, sano, huella, faltan };
 	// Primera ronda con todo bien: no se anuncia un «va todo bien» que nadie pidió.
@@ -85,13 +91,24 @@ export function decidirAviso({ estado, esperados, previo }) {
 	return { avisar: true, sano, huella, faltan };
 }
 
-export function construirMensaje({ repo, estado, esperados, faltan, sano }) {
+export function construirMensaje({ repo, estado, esperados, faltan, sano, forzado = false }) {
 	if (sano) {
-		return [
-			'✅ <b>Runners de vuelta</b>',
-			'',
-			`<b>${escaparHtml(repo)}</b> — los <code>${estado.total}</code> runners están en línea.`
-		].join('\n');
+		// Con el fleet sano hay dos motivos para hablar, y NO dicen lo mismo: una recuperación
+		// («volvieron») o una comprobación que alguien pidió a mano. Anunciar «Runners de vuelta»
+		// cuando nunca se cayó nada haría dudar de si hubo una caída que no se vio.
+		return forzado
+			? [
+					'🔎 <b>Comprobación del vigía</b>',
+					'',
+					`<b>${escaparHtml(repo)}</b> — los <code>${estado.total}</code> runners están en línea.`,
+					'',
+					'Lo pediste a mano; si lees esto, el aviso por Telegram funciona.'
+				].join('\n')
+			: [
+					'✅ <b>Runners de vuelta</b>',
+					'',
+					`<b>${escaparHtml(repo)}</b> — los <code>${estado.total}</code> runners están en línea.`
+				].join('\n');
 	}
 
 	const lineas = [
@@ -121,7 +138,7 @@ export function construirMensaje({ repo, estado, esperados, faltan, sano }) {
 	lineas.push('');
 	lineas.push(
 		estado.online === 0
-			? 'La CI se irá a runners de pago hasta que vuelvan. Enciende las computadoras del fleet.'
+			? 'La CI NO se irá a runners de pago: sus jobs se quedan en cola hasta que vuelvan (GitHub los descarta a las 24 h). Enciende las computadoras del fleet.'
 			: 'La CI sigue corriendo con los que quedan, más lenta. Revisa esa computadora.'
 	);
 	return lineas.join('\n');
@@ -249,6 +266,7 @@ function leerEstadoPrevio(ruta) {
 
 async function main() {
 	const soloPrueba = process.argv.includes('--dry-run');
+	const forzar = process.argv.includes('--forzar');
 	const repo = (leerBandera('repo') ?? process.env.REPO_VIGILADO ?? '').trim();
 	const token = (process.env.SHERMAN_PAT ?? process.env.GH_TOKEN ?? '').trim();
 	const etiqueta = (leerBandera('etiqueta') ?? ETIQUETA_POR_DEFECTO).trim();
@@ -281,18 +299,21 @@ async function main() {
 			(estado.caidos.length > 0 ? ` · fuera: ${estado.caidos.join(', ')}` : '')
 	);
 
-	const { avisar, sano, huella, faltan } = decidirAviso({ estado, esperados, previo });
+	const { avisar, sano, huella, faltan } = decidirAviso({ estado, esperados, previo, forzar });
 
 	if (rutaEstado && !soloPrueba) {
 		writeFileSync(rutaEstado, JSON.stringify({ huella, sano }), 'utf8');
 	}
 
 	if (!avisar) {
-		console.log('Sin cambios respecto a la ronda anterior: no se avisa.');
+		console.log(
+			'Sin cambios respecto a la ronda anterior: no se avisa. (Con --forzar habla igualmente.)'
+		);
 		return;
 	}
 
-	const mensaje = construirMensaje({ repo, estado, esperados, faltan, sano });
+	if (forzar) console.log('Aviso forzado: se manda aunque el estado no haya cambiado.');
+	const mensaje = construirMensaje({ repo, estado, esperados, faltan, sano, forzado: forzar });
 	if (soloPrueba) {
 		console.log('\n--- mensaje (dry-run) ---\n' + mensaje + '\n-------------------------');
 		return;
