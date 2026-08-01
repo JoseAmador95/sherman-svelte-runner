@@ -55,9 +55,13 @@ jobs:
           S="sh scripts/configurar-avisos.sh --hooks $AV/hooks --conf $AV/avisos.conf --no-preguntar"
           rechaza() {  # $1 = descripción, resto = argumentos
             _desc="$1"; shift
-            if $S "$@" >/dev/null 2>&1; then
-              echo "FALLO: aceptó una configuración inválida ($_desc)"; exit 1
-            fi
+            _rc=0; _out="$($S "$@" 2>&1)" || _rc=$?
+            [ "$_rc" -ne 0 ] || { echo "FALLO: aceptó una configuración inválida ($_desc)"; exit 1; }
+            # No basta con "salió distinto de cero": un script que no existe o que
+            # revienta también lo hace, y entonces esta prueba daría verde sin
+            # comprobar nada. Tiene que ser un rechazo EXPLÍCITO.
+            printf '%s\n' "$_out" | grep -q '^ERROR:' \
+              || { echo "FALLO: no rechazó ($_desc), falló por otra cosa: $_out"; exit 1; }
             echo "ok: rechaza $_desc"
           }
           # Pegar el token a medias es la causa nº 1 de "no me llegan los avisos".
@@ -84,7 +88,7 @@ jobs:
           [ -x "$AV/hooks/20-telegram.sh" ]     || { echo "FALLO: no activó el hook de Telegram"; exit 1; }
           echo "ok: escribe la configuración y activa los hooks"
 
-      - name: Un canal que no responde sale en ROJO
+      - name: Un canal que no responde sale en ROJO y no pisa lo que funcionaba
         run: |
           set -eu
           export PATH="$AV/bin:$PATH"
@@ -95,6 +99,14 @@ jobs:
             echo "FALLO: un canal roto pasó como bueno"; exit 1
           fi
           echo "ok: un canal roto falla en rojo"
+
+          # Y no debe haberlo guardado. Si lo guardara, como el script reusa lo
+          # guardado al re-ejecutarse, un typo en la URL quedaría PEGADO y
+          # sobreviviría a los siguientes intentos.
+          grep -q 'FALLA' "$AV/avisos.conf" && { echo "FALLO: guardó una configuración que acababa de declarar rota"; exit 1; }
+          grep -q "^HC_URL='https://hc-ping.com/uuid-de-prueba'$" "$AV/avisos.conf" \
+            || { echo "FALLO: pisó la configuración que sí funcionaba"; exit 1; }
+          echo "ok: un intento fallido deja intacto lo que ya funcionaba"
 
       # El comando del README lo encadena al despliegue, así que corre en cada
       # re-deploy. Si no reusara lo guardado, te pediría el token cada vez.
