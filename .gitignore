@@ -4,3 +4,8 @@ shermansvelterunnerkickoff.md
 
 # Cruft del SO.
 .DS_Store
+
+# Configuración de los avisos del vigía: contiene el token del bot y la URL de
+# ping. La escribe configurar-avisos.sh en ~/.config, pero si alguien la deja
+# aquí, que no acabe en un commit.
+avisos.conf
