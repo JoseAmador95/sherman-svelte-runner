@@ -1,0 +1,118 @@
+name: ci
+
+# Este repo no tenía CI en PRs. Se añade porque `configurar-avisos.sh` es el
+# script del que depende que los avisos del fleet lleguen: si se rompe, no falla
+# nada visible — simplemente dejan de llegar avisos, que es indistinguible de un
+# fleet sano. Exactamente el fallo silencioso que la vigilancia existe para
+# cerrar, así que no puede vivir sin una prueba.
+#
+# Minutos gratis: el repo es público.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ludeeus/action-shellcheck@master
+        with:
+          severity: warning
+
+  avisos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepara un entorno de prueba (hooks y curl simulados)
+        run: |
+          set -eu
+          d="$RUNNER_TEMP/av"; mkdir -p "$d/hooks" "$d/bin"
+          # Hooks mínimos: aquí se prueba el script, no los hooks (que viven en
+          # gh_runner y tienen su propio CI).
+          printf '#!/bin/sh\nexit 0\n' > "$d/hooks/10-healthchecks.sh.ejemplo"
+          printf '#!/bin/sh\nexit 0\n' > "$d/hooks/20-telegram.sh.ejemplo"
+          # curl simulado: falla solo si la URL lleva la marca FALLA.
+          cat > "$d/bin/curl" <<'STUB'
+          #!/bin/sh
+          for a in "$@"; do case "$a" in *FALLA*) exit 22 ;; esac; done
+          exit 0
+          STUB
+          chmod +x "$d/bin/curl"
+          echo "AV=$d" >> "$GITHUB_ENV"
+
+      - name: Rechaza configuraciones que no pueden funcionar
+        run: |
+          set -eu
+          export PATH="$AV/bin:$PATH"
+          S="sh scripts/configurar-avisos.sh --hooks $AV/hooks --conf $AV/avisos.conf --no-preguntar"
+          rechaza() {  # $1 = descripción, resto = argumentos
+            _desc="$1"; shift
+            if $S "$@" >/dev/null 2>&1; then
+              echo "FALLO: aceptó una configuración inválida ($_desc)"; exit 1
+            fi
+            echo "ok: rechaza $_desc"
+          }
+          # Pegar el token a medias es la causa nº 1 de "no me llegan los avisos".
+          rechaza 'un token mal formado'    --telegram-token 'sin-numero-delante' --telegram-chat -100
+          rechaza 'una URL que no es https' --hc-url 'http://hc-ping.com/uuid'
+          rechaza 'token sin chat'          --telegram-token '123:ABC'
+          rechaza 'ningún canal'
+
+      - name: Configura, activa los hooks y prueba los canales
+        run: |
+          set -eu
+          export PATH="$AV/bin:$PATH"
+          rm -f "$AV/avisos.conf" "$AV/hooks/10-healthchecks.sh" "$AV/hooks/20-telegram.sh"
+          sh scripts/configurar-avisos.sh --hooks "$AV/hooks" --conf "$AV/avisos.conf" --no-preguntar \
+             --hc-url 'https://hc-ping.com/uuid-de-prueba' \
+             --telegram-token '123456:ABC-DEF' --telegram-chat '-1001234' --telegram-thread '7'
+
+          # El fichero lleva credenciales: solo su dueño puede leerlo.
+          perm="$(stat -c '%a' "$AV/avisos.conf")"
+          [ "$perm" = "600" ] || { echo "FALLO: avisos.conf con permisos $perm, se esperaba 600"; exit 1; }
+          grep -q "^HC_URL='https://hc-ping.com/uuid-de-prueba'$" "$AV/avisos.conf" || { echo "FALLO: HC_URL"; exit 1; }
+          grep -q "^TG_TOKEN='123456:ABC-DEF'$" "$AV/avisos.conf" || { echo "FALLO: TG_TOKEN"; exit 1; }
+          [ -x "$AV/hooks/10-healthchecks.sh" ] || { echo "FALLO: no activó el hook de healthchecks"; exit 1; }
+          [ -x "$AV/hooks/20-telegram.sh" ]     || { echo "FALLO: no activó el hook de Telegram"; exit 1; }
+          echo "ok: escribe la configuración y activa los hooks"
+
+      - name: Un canal que no responde sale en ROJO
+        run: |
+          set -eu
+          export PATH="$AV/bin:$PATH"
+          # Si esto saliera en verde, creerías tener avisos configurados y no los
+          # tendrías: el fallo aparecería la noche que algo se rompe.
+          if sh scripts/configurar-avisos.sh --hooks "$AV/hooks" --conf "$AV/avisos.conf" \
+               --no-preguntar --hc-url 'https://hc-ping.com/FALLA' >/dev/null 2>&1; then
+            echo "FALLO: un canal roto pasó como bueno"; exit 1
+          fi
+          echo "ok: un canal roto falla en rojo"
+
+      - name: No pisa un hook que ya hubieras ajustado
+        run: |
+          set -eu
+          export PATH="$AV/bin:$PATH"
+          echo '# ajuste propio' >> "$AV/hooks/20-telegram.sh"
+          sh scripts/configurar-avisos.sh --hooks "$AV/hooks" --conf "$AV/avisos.conf" --no-preguntar \
+             --telegram-token '123456:ABC-DEF' --telegram-chat '-1001234' >/dev/null 2>&1
+          grep -q '# ajuste propio' "$AV/hooks/20-telegram.sh" \
+            || { echo "FALLO: pisó un hook ya ajustado"; exit 1; }
+          echo "ok: idempotente, respeta lo que ya hubieras tocado"
+
+      - name: El repo no contiene credenciales
+        run: |
+          set -eu
+          # Es público: una URL de ping o un token de bot aquí serían una fuga.
+          if grep -rInE 'hc-ping\.com/[0-9a-f]{8}|bot[0-9]{6,}:[A-Za-z0-9_-]{30,}' \
+               --exclude-dir=.git . ; then
+            echo "FALLO: hay algo que parece una credencial en el repo"; exit 1
+          fi
+          echo "ok: sin credenciales en el repo"
