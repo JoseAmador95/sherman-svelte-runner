@@ -248,8 +248,11 @@ lo que quieres ver. Así el token del bot no vive en ninguna máquina y cambiar 
 exige tocar el fleet.
 
 La **ping key es del proyecto**, no de un check: la misma sirve para todas las máquinas, y el check
-de cada cluster **se crea solo** en su primer ping. Si además le das una **API key**, el vigía deja
-ese check con el periodo y el margen correctos; si no, ajústalos a mano una vez — el check
+**de cada máquina** se crea solo en su primer ping (el nombre lleva cluster y host, así que dos Macs
+no comparten check — si lo compartieran, el latido sano de uno lo mantendría verde con el otro
+muerto). Si además le das una **API key**, el vigía deja
+ese check con el periodo y el margen correctos —**10 y 5 minutos**, derivados de la cadencia de la
+ronda—; si no, ajústalos a mano una vez, y el script te lo recuerda con los números exactos. El check
 autocreado nace con **periodo de 1 día**, y con eso un host caído tardaría un día en avisar.
 
 Esa prueba es el motivo de que exista el script. Un aviso mal cableado **no falla: calla** — y

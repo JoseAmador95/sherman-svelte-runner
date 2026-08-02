@@ -205,6 +205,19 @@ chmod 600 "$CONF"
 info ""
 info "Escrito $CONF (chmod 600)."
 
+# El aviso que más importa de todo el script. Sin API key, el check autocreado se
+# queda con el periodo por defecto de healthchecks.io —UN DÍA— y con eso una
+# máquina apagada tarda un día en avisar: creerías estar vigilado sin estarlo.
+if [ -n "$HC_PING_KEY" ] && [ -z "$HC_API_KEY" ]; then
+    info ""
+    info "⚠  SIN API KEY: el check se crea con PERIODO DE 1 DÍA y margen de 1 hora."
+    info "   Con eso, una máquina caída tardaría UN DÍA en avisar."
+    info "   Ajústalo A MANO en el panel del check (una vez):"
+    info "       Period      = 10 minutes"
+    info "       Grace Time  = 5 minutes"
+    info "   O vuelve a ejecutar esto con --hc-api-key y lo deja puesto el vigía."
+fi
+
 # ---- Activar los hooks -----------------------------------------------------
 # Los hooks los instala `deploy.sh --vigilar` con sufijo .ejemplo, para que no
 # se ejecuten a medio configurar. Activarlos es quitarles el sufijo.
