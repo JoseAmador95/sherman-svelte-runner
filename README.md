@@ -29,22 +29,31 @@ de Compose autofusiona el override al hacer `up -d`.
 
 ```bash
 # NINGÚN secreto va en el comando: te los pregunta al vuelo, así no quedan en el
-# historial del shell. Son dos: el PAT (al empezar) y, al final, la URL de ping
-# de healthchecks.io + el token del bot de Telegram para los avisos.
+# historial del shell. Son dos: el PAT (al empezar) y la ping key de
+# healthchecks.io (al configurar los avisos).
 
 curl -fsSL -O https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/compose.override.yaml \
   && sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.sh)" -- \
        --repo demeneghi/sherman-svelte \
        --image ghcr.io/joseamador95/sherman-svelte-runner:latest \
        --labels sherman,self-hosted \
-       --count 3 --vigilar --up \
-  && sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/scripts/configurar-avisos.sh)"
+       --count 3 --vigilar --no-up \
+  && sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/scripts/configurar-avisos.sh)" \
+  && podman compose up -d
 ```
 
-Tres tramos encadenados con `&&`: baja el `compose.override.yaml`, despliega los runners
-con el vigía puesto (**`--vigilar`**, ver [Vigilancia del fleet](#vigilancia-del-fleet)), y
-configura por dónde te avisa. **Es re-ejecutable**: en la segunda pasada reusa la
-configuración de avisos que ya escribió y no vuelve a preguntarte nada.
+Cuatro tramos encadenados con `&&`: baja el `compose.override.yaml`, **genera** el despliegue
+con el vigía puesto (**`--vigilar`**, ver [Vigilancia del fleet](#vigilancia-del-fleet)),
+configura por dónde te avisa, y **solo entonces levanta el cluster**.
+
+**El `--no-up` es a propósito.** Los avisos se configuran **antes** de que arranque nada: si la
+ping key está mal, el comando se corta ahí y no llegas a tener runners corriendo sin vigilancia
+efectiva. El orden interno no es negociable en el otro sentido —`configurar-avisos.sh` necesita el
+`./vigia/hooks.d` que crea `deploy.sh`—, pero el arranque sí se puede dejar para el final, y ahí es
+donde importa.
+
+**Es re-ejecutable**: en la segunda pasada reusa la configuración de avisos que ya escribió y no
+vuelve a preguntarte nada.
 
 > **Token.** `deploy.sh` necesita un **PAT** con *Administration: Read and write* sobre
 > `demeneghi/sherman-svelte` (con él acuña los registration-tokens). **Por eso el comando
@@ -220,19 +229,23 @@ podman compose logs -f vigia
 el nombre del cluster (el del directorio del despliegue) encabeza cada aviso. No hay nada que
 configurar para eso.
 
-#### Configurar los avisos (Telegram y healthchecks.io)
+#### Configurar los avisos
 
-Va incluido en el comando de despliegue. Para (re)configurarlos por separado —cambiar de chat,
-rotar el token del bot, añadir un canal— es el mismo script suelto:
+Va incluido en el comando de despliegue. Para (re)configurarlos por separado —cambiar de proyecto,
+rotar la ping key— es el mismo script suelto:
 
 ```bash
 sh scripts/configurar-avisos.sh
 ```
 
-Córrelo **en el directorio del despliegue**. Te pregunta la *ping key* de healthchecks.io y el token
-del bot, escribe `./vigia/avisos.conf` (**chmod 600**), activa los hooks que correspondan y **manda
-una prueba por cada canal**. Reusa lo que ya hubiera guardado, así que solo tienes que responder lo
-que quieras cambiar.
+Córrelo **en el directorio del despliegue**. Te pregunta la *ping key* de healthchecks.io, escribe
+`./vigia/avisos.conf` (**chmod 600**), activa el hook y **manda una prueba**. Reusa lo que ya hubiera
+guardado, así que solo tienes que responder lo que quieras cambiar.
+
+**Telegram no se configura aquí: se configura en healthchecks.io.** Su notificación **reenvía el
+informe entero** en monospace, más el estado de los demás checks — que con varios clusters es justo
+lo que quieres ver. Así el token del bot no vive en ninguna máquina y cambiar a quién avisas no
+exige tocar el fleet.
 
 La **ping key es del proyecto**, no de un check: la misma sirve para todas las máquinas, y el check
 de cada cluster **se crea solo** en su primer ping. Si además le das una **API key**, el vigía deja
@@ -246,11 +259,11 @@ noche que algo se rompe, que es cuando ya no sirve de nada.
 Para automatizar varias máquinas, los valores también salen del entorno:
 
 ```bash
-HC_PING_KEY=… TG_TOKEN=… TG_CHAT=… sh scripts/configurar-avisos.sh --no-preguntar
+HC_PING_KEY=… sh scripts/configurar-avisos.sh --no-preguntar
 ```
 
-> ⚠️ Por defecto **pregunta** en vez de aceptar banderas, igual que `deploy.sh` con el PAT: así el
-> token no queda en el historial del shell. Con `--no-preguntar` sí queda — úsalo solo desde un
+> ⚠️ Por defecto **pregunta** en vez de aceptar banderas, igual que `deploy.sh` con el PAT: así la
+> clave no queda en el historial del shell. Con `--no-preguntar` sí queda — úsalo solo desde un
 > script de aprovisionamiento.
 
 Una vez configurada una máquina, replicarla es copiar **un solo fichero** — y con ping key el
