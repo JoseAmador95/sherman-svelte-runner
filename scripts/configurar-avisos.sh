@@ -4,10 +4,10 @@
 #
 # El vigía (gh_runner: `deploy.sh --vigilar`) detecta runners atascados, caídos
 # y el reloj desfasado, pero NO decide cómo te avisa: eso lo hacen los hooks, y
-# cada hook necesita su credencial. Este script hace ese último tramo sin que
+# el hook necesita su credencial. Este script hace ese último tramo sin que
 # tengas que editar ficheros a mano en cada host:
 #
-#   1. Escribe ~/.config/gh-runner/avisos.conf (chmod 600) con tus valores.
+#   1. Escribe ./vigia/avisos.conf (chmod 600) con tus valores.
 #   2. Activa los hooks que correspondan (copia el .ejemplo sin el sufijo).
 #   3. MANDA UNA PRUEBA por cada canal configurado.
 #
@@ -22,7 +22,7 @@
 #   sh scripts/configurar-avisos.sh
 #
 # Desatendido (ojo: los valores quedan en el historial del shell):
-#   HC_URL=… TG_TOKEN=… TG_CHAT=… sh scripts/configurar-avisos.sh --no-preguntar
+#   HC_PING_KEY=… sh scripts/configurar-avisos.sh --no-preguntar
 #
 # Un solo canal también vale: deja el otro en blanco y no se toca.
 # ============================================================================
@@ -47,9 +47,6 @@ while [ "$#" -gt 0 ]; do
         --hc-url)           HC_URL="${2:?}"; shift 2 ;;
         --hc-ping-key)      HC_PING_KEY="${2:?}"; shift 2 ;;
         --hc-api-key)       HC_API_KEY="${2:?}"; shift 2 ;;
-        --telegram-token)   TG_TOKEN="${2:?}"; shift 2 ;;
-        --telegram-chat)    TG_CHAT="${2:?}"; shift 2 ;;
-        --telegram-thread)  TG_THREAD="${2:?}"; shift 2 ;;
         --hooks)            HOOKS_DIR="${2:?}"; shift 2 ;;
         --conf)             CONF="${2:?}"; shift 2 ;;
         --no-preguntar)     PREGUNTAR="no"; shift ;;
@@ -62,9 +59,6 @@ while [ "$#" -gt 0 ]; do
             else
                 info 'Uso: configurar-avisos.sh [opciones]'
                 info '  --hc-url URL            Ping de healthchecks.io (env: HC_URL)'
-                info '  --telegram-token TOKEN  Bot de Telegram          (env: TG_TOKEN)'
-                info '  --telegram-chat ID      Chat destino             (env: TG_CHAT)'
-                info '  --telegram-thread ID    Tema del grupo, opcional (env: TG_THREAD)'
                 info '  --hooks RUTA            Dir de hooks del vigía'
                 info '  --conf RUTA             Dónde guardar la configuración'
                 info '  --no-preguntar          No preguntar lo que falte'
@@ -76,9 +70,6 @@ while [ "$#" -gt 0 ]; do
 done
 
 HC_URL="${HC_URL:-}"
-TG_TOKEN="${TG_TOKEN:-}"
-TG_CHAT="${TG_CHAT:-}"
-TG_THREAD="${TG_THREAD:-}"
 
 command -v curl >/dev/null 2>&1 || err "hace falta 'curl'."
 
@@ -86,7 +77,7 @@ command -v curl >/dev/null 2>&1 || err "hace falta 'curl'."
 # Sin esto, volver a ejecutar (por ejemplo si el comando de despliegue lo
 # encadena) pediría el token OTRA VEZ en cada re-deploy. Precedencia final:
 # bandera > entorno > lo que ya había en el fichero > preguntar.
-_hc="$HC_URL"; _tt="$TG_TOKEN"; _tc="$TG_CHAT"; _th="$TG_THREAD"
+_hc="$HC_URL"
 _pk="$HC_PING_KEY"; _ak="$HC_API_KEY"
 YA_HABIA="no"
 if [ -r "$CONF" ]; then
@@ -95,9 +86,6 @@ if [ -r "$CONF" ]; then
     YA_HABIA="si"
 fi
 [ -n "$_hc" ] && HC_URL="$_hc"
-[ -n "$_tt" ] && TG_TOKEN="$_tt"
-[ -n "$_tc" ] && TG_CHAT="$_tc"
-[ -n "$_th" ] && TG_THREAD="$_th"
 [ -n "$_pk" ] && HC_PING_KEY="$_pk"
 [ -n "$_ak" ] && HC_API_KEY="$_ak"
 [ "$YA_HABIA" = "si" ] && info "Reusando lo que ya había en $CONF (una bandera o variable de entorno lo sustituye)."
@@ -135,29 +123,15 @@ if [ "$PREGUNTAR" = "si" ] && [ -t 0 ]; then
         info "en avisar."
         HC_API_KEY="$(preguntar 'API key del proyecto (Enter para omitir): ')"
     fi
-    [ -n "$TG_TOKEN" ] || TG_TOKEN="$(preguntar 'Token del bot de Telegram: ')"
-    if [ -n "$TG_TOKEN" ]; then
-        [ -n "$TG_CHAT" ]   || TG_CHAT="$(preguntar 'Chat id de Telegram: ')"
-        [ -n "$TG_THREAD" ] || TG_THREAD="$(preguntar 'Id del tema (opcional, Enter para omitir): ')"
-    fi
 fi
 
-[ -n "$HC_URL$HC_PING_KEY$TG_TOKEN" ] || err "no configuraste ningún canal; no hay nada que hacer."
+[ -n "$HC_URL$HC_PING_KEY" ] || err "no configuraste ningún canal; no hay nada que hacer."
 
 # ---- Validaciones de forma (baratas, y ahorran un susto) -------------------
 if [ -n "$HC_URL" ]; then
     case "$HC_URL" in
         https://*) : ;;
         *) err "la URL de ping debe empezar por https:// (llegó: '$HC_URL')" ;;
-    esac
-fi
-if [ -n "$TG_TOKEN" ]; then
-    [ -n "$TG_CHAT" ] || err "con token de Telegram hace falta también el chat id."
-    # El token de BotFather es <digitos>:<resto>. Un token pegado a medias es la
-    # causa nº 1 de "no me llegan los avisos", y aquí cuesta una línea verlo.
-    case "$TG_TOKEN" in
-        [0-9]*:?*) : ;;
-        *) err "el token del bot no tiene la forma <numero>:<resto> (¿lo pegaste entero?)" ;;
     esac
 fi
 
@@ -202,20 +176,6 @@ if [ "$PROBAR" = "si" ]; then
         fi
     fi
 
-    if [ -n "$TG_TOKEN" ]; then
-        _host="$(hostname 2>/dev/null || echo host)"
-        set -- --data-urlencode "chat_id=${TG_CHAT}" \
-               --data-urlencode "text=🔧 Avisos configurados en ${_host%%.*}. Este es el canal por el que llegarán las alertas del fleet."
-        [ -n "$TG_THREAD" ] && set -- "$@" --data-urlencode "message_thread_id=${TG_THREAD}"
-        if curl -fsS -m 15 --retry 2 -X POST "$@" \
-                "https://api.telegram.org/bot${TG_TOKEN}/sendMessage" >/dev/null 2>&1; then
-            info "  Telegram: OK (mira el chat)."
-        else
-            info "  Telegram: FALLÓ. Token, chat id, o el bot no puede publicar en ese chat."
-            info "    Recuerda: un bot no puede escribir primero a una persona; en grupo, dale permiso de publicar."
-            _fallos=$(( _fallos + 1 ))
-        fi
-    fi
 
     if [ "$_fallos" -gt 0 ]; then
         info ""
@@ -239,9 +199,6 @@ mkdir -p "$(dirname "$CONF")"
     [ -n "$HC_PING_KEY" ] && printf 'HC_PING_KEY=%s\n' "$(entrecomillar "$HC_PING_KEY")"
     [ -n "$HC_API_KEY" ]  && printf 'HC_API_KEY=%s\n' "$(entrecomillar "$HC_API_KEY")"
     [ -n "$HC_URL" ]    && printf 'HC_URL=%s\n' "$(entrecomillar "$HC_URL")"
-    [ -n "$TG_TOKEN" ]  && printf 'TG_TOKEN=%s\n' "$(entrecomillar "$TG_TOKEN")"
-    [ -n "$TG_CHAT" ]   && printf 'TG_CHAT=%s\n' "$(entrecomillar "$TG_CHAT")"
-    [ -n "$TG_THREAD" ] && printf 'TG_THREAD=%s\n' "$(entrecomillar "$TG_THREAD")"
     :
 } > "$CONF"
 chmod 600 "$CONF"
@@ -265,7 +222,6 @@ activar() {  # $1 = nombre del hook
 
 info "Hooks en $HOOKS_DIR:"
 { [ -n "$HC_URL" ] || [ -n "$HC_PING_KEY" ]; } && activar 10-healthchecks.sh
-[ -n "$TG_TOKEN" ] && activar 20-telegram.sh
 
 info ""
 if [ "$PROBAR" = "si" ]; then
