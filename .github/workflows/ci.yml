@@ -34,17 +34,31 @@ jobs:
       - name: Prepara un entorno de prueba (hooks y curl simulados)
         run: |
           set -eu
-          d="$RUNNER_TEMP/av"; mkdir -p "$d/hooks" "$d/bin"
+          d="$RUNNER_TEMP/av"; mkdir -p "$d/hooks" "$d/bin" "$d/despliegue"
           # Hooks mínimos: aquí se prueba el script, no los hooks (que viven en
           # gh_runner y tienen su propio CI).
           printf '#!/bin/sh\nexit 0\n' > "$d/hooks/10-healthchecks.sh.ejemplo"
-          # curl simulado: falla solo si la URL lleva la marca FALLA.
+          # curl simulado: apunta las URLs que le pidan y falla solo si la URL
+          # lleva la marca FALLA. $AV lo exporta GITHUB_ENV, así que el stub lo ve.
           cat > "$d/bin/curl" <<'STUB'
           #!/bin/sh
+          for a in "$@"; do case "$a" in https://*) echo "$a" >> "$AV/urls" ;; esac; done
           for a in "$@"; do case "$a" in *FALLA*) exit 22 ;; esac; done
           exit 0
           STUB
           chmod +x "$d/bin/curl"
+
+          # Un compose como el que emite `deploy.sh --prefix sherman … --vigilar`.
+          # El directorio se llama "despliegue" A PROPÓSITO: si el nombre del check
+          # volviera a salir del nombre de la carpeta, aquí saldría "despliegue" y
+          # la prueba lo caza.
+          cat > "$d/despliegue/compose.yaml" <<'YAML'
+          services:
+            vigia:
+              environment:
+                VIGIA_CLUSTER: "sherman"
+                VIGIA_HOST: "mmJA"
+          YAML
           echo "AV=$d" >> "$GITHUB_ENV"
 
       - name: Rechaza configuraciones que no pueden funcionar
@@ -66,6 +80,13 @@ jobs:
           # Pegar el token a medias es la causa nº 1 de "no me llegan los avisos".
           rechaza 'una URL que no es https' --hc-url 'http://hc-ping.com/uuid'
           rechaza 'ningún canal'
+
+          # Sin saber a qué cluster pertenece esta máquina, el nombre del check
+          # sería una adivinanza — y adivinarlo mal es lo que creaba un check
+          # duplicado por despliegue. Mejor parar y decirlo.
+          rechaza 'una ping key sin compose.yaml' --compose "$AV/no-existe.yaml" --hc-ping-key 'PKTEST'
+          printf 'services:\n  vigia:\n    environment:\n      VIGIA_CLUSTER: "sherman"\n' > "$AV/viejo.yaml"
+          rechaza 'un compose sin VIGIA_HOST' --compose "$AV/viejo.yaml" --hc-ping-key 'PKTEST'
 
       - name: Configura, activa los hooks y prueba los canales
         run: |
@@ -123,10 +144,35 @@ jobs:
           set -eu
           export PATH="$AV/bin:$PATH"
           echo '# ajuste propio' >> "$AV/hooks/10-healthchecks.sh"
-          sh scripts/configurar-avisos.sh --hooks "$AV/hooks" --conf "$AV/avisos.conf" --no-preguntar --hc-ping-key 'PKTEST' >/dev/null 2>&1
+          sh scripts/configurar-avisos.sh --hooks "$AV/hooks" --conf "$AV/avisos.conf" \
+             --compose "$AV/despliegue/compose.yaml" --no-preguntar --hc-ping-key 'PKTEST' >/dev/null 2>&1
           grep -q '# ajuste propio' "$AV/hooks/10-healthchecks.sh" \
             || { echo "FALLO: pisó un hook ya ajustado"; exit 1; }
           echo "ok: idempotente, respeta lo que ya hubieras tocado"
+
+      - name: La prueba pingea EL MISMO check que el vigía, no uno paralelo
+        run: |
+          set -eu
+          export PATH="$AV/bin:$PATH"
+          # La regresión que esto cierra: el README encadena deploy.sh con este
+          # script, así que las dos identidades se calculaban en el MISMO deploy.
+          # Como cada una salía de un sitio distinto —aquí el nombre de la carpeta,
+          # allí cluster+máquina—, un solo despliegue creaba DOS checks: el del
+          # vigía, bien configurado, y este otro huérfano que nadie pingea nunca
+          # más y que al cabo de un día se pone en rojo solo.
+          rm -f "$AV/urls" "$AV/avisos.conf"
+          sh scripts/configurar-avisos.sh --hooks "$AV/hooks" --conf "$AV/avisos.conf" \
+             --compose "$AV/despliegue/compose.yaml" --no-preguntar --hc-ping-key 'PKTEST' >/dev/null 2>&1
+
+          url="$(grep 'hc-ping.com' "$AV/urls" | head -n1)"
+          # El slug se fija como literal porque el hook vive en el OTRO repo
+          # (gh_runner: hooks/10-healthchecks.sh.ejemplo), donde su CI comprueba
+          # la misma forma <cluster>-<máquina> en minúsculas. Son los dos extremos
+          # del mismo contrato: si alguien mueve uno, este test lo para.
+          esperado='https://hc-ping.com/PKTEST/sherman-mmja?create=1'
+          [ "$url" = "$esperado" ] || {
+            echo "FALLO: pingeó   '$url'"; echo "       se esperaba '$esperado'"; exit 1; }
+          echo "ok: un despliegue crea UN check, y es el del vigía"
 
       - name: El repo no contiene credenciales
         run: |

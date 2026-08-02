@@ -37,6 +37,10 @@ info() { printf '%s\n' "$*" >&2; }
 # aunque el otro estuviese muerto.
 HOOKS_DIR="${VIGILAR_HOOKS:-$(pwd)/vigia/hooks.d}"
 CONF="${VIGILAR_CONF:-$(pwd)/vigia/avisos.conf}"
+# De aquí sale la IDENTIDAD del cluster (ver más abajo, en la prueba del canal).
+# No se deduce del nombre del directorio: tiene que ser exactamente la misma que
+# usa el vigía, y la única forma de garantizarlo es leerla de donde él la lee.
+COMPOSE="${VIGILAR_COMPOSE:-$(pwd)/compose.yaml}"
 HC_PING_KEY="${HC_PING_KEY:-}"
 HC_API_KEY="${HC_API_KEY:-}"
 PREGUNTAR="si"
@@ -49,6 +53,7 @@ while [ "$#" -gt 0 ]; do
         --hc-api-key)       HC_API_KEY="${2:?}"; shift 2 ;;
         --hooks)            HOOKS_DIR="${2:?}"; shift 2 ;;
         --conf)             CONF="${2:?}"; shift 2 ;;
+        --compose)          COMPOSE="${2:?}"; shift 2 ;;
         --no-preguntar)     PREGUNTAR="no"; shift ;;
         --no-probar)        PROBAR="no"; shift ;;
         -h|--help)
@@ -61,6 +66,7 @@ while [ "$#" -gt 0 ]; do
                 info '  --hc-url URL            Ping de healthchecks.io (env: HC_URL)'
                 info '  --hooks RUTA            Dir de hooks del vigía'
                 info '  --conf RUTA             Dónde guardar la configuración'
+                info '  --compose RUTA          compose.yaml del que sale el nombre del check'
                 info '  --no-preguntar          No preguntar lo que falte'
                 info '  --no-probar             No mandar la prueba por cada canal'
             fi
@@ -155,13 +161,36 @@ if [ "$PROBAR" = "si" ]; then
     info "Probando los canales..."
 
     if [ -n "$HC_URL" ] || [ -n "$HC_PING_KEY" ]; then
-        # Con ping key, el slug es el nombre del CLUSTER: el mismo que usará el
-        # vigía. Y `?create=1` deja el check ya creado, así que esta prueba hace
-        # doble trabajo: valida la clave y da de alta el cluster.
+        # Con ping key, el slug identifica a ESTE cluster EN ESTA máquina: el
+        # mismo que usará el vigía en cada ronda. Y `?create=1` deja el check ya
+        # creado, así que esta prueba hace doble trabajo: valida la clave y da de
+        # alta el cluster.
         if [ -n "$HC_URL" ]; then
             _destino="$HC_URL"
         else
-            _slug="$(basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+            # El slug SALE DEL compose.yaml, no del nombre del directorio. Es la
+            # misma identidad que usará el hook en cada ronda (cluster + máquina),
+            # y leerla de ahí es lo único que garantiza que no diverjan: cuando se
+            # calculaban por separado, un solo despliegue creaba DOS checks —el de
+            # esta prueba y el del vigía— y solo uno quedaba bien configurado.
+            _cl="$(sed -n 's/^[[:space:]]*VIGIA_CLUSTER:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$COMPOSE" 2>/dev/null | head -n1)"
+            _ho="$(sed -n 's/^[[:space:]]*VIGIA_HOST:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}[[:space:]]*$/\1/p' "$COMPOSE" 2>/dev/null | head -n1)"
+
+            if [ -z "$_cl" ]; then
+                err "no encuentro VIGIA_CLUSTER en $COMPOSE.
+       Corre esto en el directorio del despliegue, y genera antes el vigía:
+           sh deploy.sh … --vigilar
+       (o apunta al compose con --compose RUTA)"
+            fi
+            if [ -z "$_ho" ]; then
+                err "tu $COMPOSE no tiene VIGIA_HOST: lo generó una versión anterior.
+       Sin él, el vigía usa el ID del contenedor como nombre de máquina, y ese ID
+       CAMBIA en cada arranque: tendrías un check nuevo cada vez.
+       Vuelve a generar el despliegue:  sh deploy.sh … --vigilar --no-up"
+            fi
+
+            _slug="$(printf '%s-%s' "$_cl" "$_ho" \
+                     | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | tr -s '-')"
             _destino="https://hc-ping.com/${HC_PING_KEY}/${_slug%-}?create=1"
         fi
         # Ping normal, NUNCA /fail: una prueba no debe dejar el check en rojo ni

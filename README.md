@@ -234,8 +234,8 @@ podman compose logs -f vigia
 ```
 
 **Con varios clusters en una misma máquina**, cada uno lleva su propio vigía y su propio check, y
-el nombre del cluster (el del directorio del despliegue) encabeza cada aviso. No hay nada que
-configurar para eso.
+el nombre del cluster (el de `--prefix`, o el del directorio si no lo pasas) encabeza cada aviso.
+No hay nada que configurar para eso: basta con que cada despliegue use un `--prefix` distinto.
 
 #### Configurar los avisos
 
@@ -278,7 +278,8 @@ HC_PING_KEY=… sh scripts/configurar-avisos.sh --no-preguntar
 > script de aprovisionamiento.
 
 Una vez configurada una máquina, replicarla es copiar **un solo fichero** — y con ping key el
-contenido es **idéntico** en todas, porque el check lo identifica el nombre del cluster:
+contenido es **idéntico** en todas, porque a cada una la identifica su propio `compose.yaml`
+(de ahí salen el cluster y la máquina que nombran el check), no lo que haya en `avisos.conf`:
 
 ```bash
 scp ./vigia/avisos.conf otro-host:~/ruta-del-despliegue/vigia/
