@@ -37,6 +37,7 @@ curl -fsSL -O https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runn
        --repo demeneghi/sherman-svelte \
        --image ghcr.io/joseamador95/sherman-svelte-runner:latest \
        --labels sherman,self-hosted \
+       --prefix sherman \
        --count 3 --vigilar --no-up \
   && sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/scripts/configurar-avisos.sh)" \
   && podman compose up -d
@@ -45,6 +46,13 @@ curl -fsSL -O https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runn
 Cuatro tramos encadenados con `&&`: baja el `compose.override.yaml`, **genera** el despliegue
 con el vigía puesto (**`--vigilar`**, ver [Vigilancia del fleet](#vigilancia-del-fleet)),
 configura por dónde te avisa, y **solo entonces levanta el cluster**.
+
+**El `--prefix sherman` también.** Ese nombre es la identidad del fleet y gobierna **las dos** cosas
+que hay que reconocer luego: los runners se llaman `sherman-<máquina>-<n>` y el check de
+healthchecks.io, `sherman-<máquina>`. Sin él, el nombre saldría del **directorio** donde ejecutes el
+comando, que suele ser el del clon (`sherman-svelte-runner-mmJA-1`, largo y accidental). La máquina
+la añade el propio despliegue, así que **no la pongas en el prefijo** o saldrá repetida —
+`deploy.sh` avisa si lo detecta.
 
 **El `--no-up` es a propósito.** Los avisos se configuran **antes** de que arranque nada: si la
 ping key está mal, el comando se corta ahí y no llegas a tener runners corriendo sin vigilancia
