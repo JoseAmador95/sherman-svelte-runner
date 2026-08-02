@@ -5,7 +5,15 @@ shermansvelterunnerkickoff.md
 # Cruft del SO.
 .DS_Store
 
-# Configuración de los avisos del vigía: contiene el token del bot y la URL de
-# ping. La escribe configurar-avisos.sh en ~/.config, pero si alguien la deja
-# aquí, que no acabe en un commit.
+# Configuración de los avisos del vigía: contiene credenciales. La escribe
+# configurar-avisos.sh en ./vigia/ del despliegue; si ese despliegue es este
+# mismo clon, que no acabe en un commit.
 avisos.conf
+
+# Artefactos de un despliegue hecho DENTRO de este clon. Lo recomendado es un
+# directorio dedicado, pero se hace, y `.env` lleva el PAT: que un `git add -A`
+# no lo pueda subir.
+.env
+access_token
+compose.yaml
+vigia/
