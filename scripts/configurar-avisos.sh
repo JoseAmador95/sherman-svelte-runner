@@ -31,14 +31,22 @@ set -eu
 err()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 info() { printf '%s\n' "$*" >&2; }
 
-HOOKS_DIR="${VIGILAR_HOOKS:-${XDG_CONFIG_HOME:-$HOME/.config}/gh-runner/hooks.d}"
-CONF="${VIGILAR_CONF:-${XDG_CONFIG_HOME:-$HOME/.config}/gh-runner/avisos.conf}"
+# El directorio del DESPLIEGUE, no ~/.config: es lo que permite que dos clusters
+# de la misma máquina tengan avisos separados. Con la ruta compartida de antes,
+# ambos pingeaban el MISMO check y el latido sano de uno mantenía el check verde
+# aunque el otro estuviese muerto.
+HOOKS_DIR="${VIGILAR_HOOKS:-$(pwd)/vigia/hooks.d}"
+CONF="${VIGILAR_CONF:-$(pwd)/vigia/avisos.conf}"
+HC_PING_KEY="${HC_PING_KEY:-}"
+HC_API_KEY="${HC_API_KEY:-}"
 PREGUNTAR="si"
 PROBAR="si"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --hc-url)           HC_URL="${2:?}"; shift 2 ;;
+        --hc-ping-key)      HC_PING_KEY="${2:?}"; shift 2 ;;
+        --hc-api-key)       HC_API_KEY="${2:?}"; shift 2 ;;
         --telegram-token)   TG_TOKEN="${2:?}"; shift 2 ;;
         --telegram-chat)    TG_CHAT="${2:?}"; shift 2 ;;
         --telegram-thread)  TG_THREAD="${2:?}"; shift 2 ;;
@@ -79,6 +87,7 @@ command -v curl >/dev/null 2>&1 || err "hace falta 'curl'."
 # encadena) pediría el token OTRA VEZ en cada re-deploy. Precedencia final:
 # bandera > entorno > lo que ya había en el fichero > preguntar.
 _hc="$HC_URL"; _tt="$TG_TOKEN"; _tc="$TG_CHAT"; _th="$TG_THREAD"
+_pk="$HC_PING_KEY"; _ak="$HC_API_KEY"
 YA_HABIA="no"
 if [ -r "$CONF" ]; then
     # shellcheck source=/dev/null
@@ -89,6 +98,8 @@ fi
 [ -n "$_tt" ] && TG_TOKEN="$_tt"
 [ -n "$_tc" ] && TG_CHAT="$_tc"
 [ -n "$_th" ] && TG_THREAD="$_th"
+[ -n "$_pk" ] && HC_PING_KEY="$_pk"
+[ -n "$_ak" ] && HC_API_KEY="$_ak"
 [ "$YA_HABIA" = "si" ] && info "Reusando lo que ya había en $CONF (una bandera o variable de entorno lo sustituye)."
 
 # ---- Preguntar lo que falte ------------------------------------------------
@@ -104,7 +115,26 @@ preguntar() {  # $1 = texto
 if [ "$PREGUNTAR" = "si" ] && [ -t 0 ]; then
     info "Deja en blanco cualquier canal que no quieras configurar."
     info ""
-    [ -n "$HC_URL" ]   || HC_URL="$(preguntar 'URL de ping de healthchecks.io: ')"
+    # La PING KEY es del proyecto, no de un check: la misma sirve para todas las
+    # máquinas, y el check de cada cluster se crea solo en su primer ping. Es lo
+    # que hace que montar un cluster nuevo no exija tocar el panel.
+    if [ -z "$HC_URL" ] && [ -z "$HC_PING_KEY" ]; then
+        info "healthchecks.io — Settings del proyecto -> «Ping key»."
+        HC_PING_KEY="$(preguntar 'Ping key del proyecto (Enter para usar una URL suelta): ')"
+        [ -n "$HC_PING_KEY" ] || HC_URL="$(preguntar 'URL de ping de un check concreto: ')"
+    fi
+    # Opcional y más potente que la ping key: permite leer y modificar TODOS los
+    # checks del proyecto. A cambio, el vigía deja su check con el periodo y el
+    # margen correctos; sin ella, el check autocreado nace con periodo de 1 día y
+    # hay que ajustarlo a mano una vez.
+    if [ -n "$HC_PING_KEY" ] && [ -z "$HC_API_KEY" ]; then
+        info ""
+        info "Opcional: con una API key el vigía configura su propio check (periodo,"
+        info "margen, etiquetas). Sin ella, el check nace con periodo de 1 DÍA y hay"
+        info "que ajustarlo a mano en el panel — si no, un host caído tarda un día"
+        info "en avisar."
+        HC_API_KEY="$(preguntar 'API key del proyecto (Enter para omitir): ')"
+    fi
     [ -n "$TG_TOKEN" ] || TG_TOKEN="$(preguntar 'Token del bot de Telegram: ')"
     if [ -n "$TG_TOKEN" ]; then
         [ -n "$TG_CHAT" ]   || TG_CHAT="$(preguntar 'Chat id de Telegram: ')"
@@ -112,7 +142,7 @@ if [ "$PREGUNTAR" = "si" ] && [ -t 0 ]; then
     fi
 fi
 
-[ -n "$HC_URL$TG_TOKEN" ] || err "no configuraste ningún canal; no hay nada que hacer."
+[ -n "$HC_URL$HC_PING_KEY$TG_TOKEN" ] || err "no configuraste ningún canal; no hay nada que hacer."
 
 # ---- Validaciones de forma (baratas, y ahorran un susto) -------------------
 if [ -n "$HC_URL" ]; then
@@ -134,7 +164,8 @@ fi
 # Se comprueba ANTES de probar los canales: no tiene sentido mandar mensajes de
 # prueba para acabar fallando porque el vigía ni siquiera está instalado.
 [ -d "$HOOKS_DIR" ] || err "no existe $HOOKS_DIR.
-       Instala antes el vigía:  sh deploy.sh … --vigilar   (o pasa --hooks RUTA)"
+       Corre esto en el DIRECTORIO del despliegue (donde está compose.yaml), y
+       genera antes el vigía:  sh deploy.sh … --vigilar   (o pasa --hooks RUTA)"
 
 # ---- Probar ANTES de guardar nada ------------------------------------------
 # El orden importa. Guardar primero y probar después dejaría en disco una
@@ -149,15 +180,24 @@ if [ "$PROBAR" = "si" ]; then
     info ""
     info "Probando los canales..."
 
-    if [ -n "$HC_URL" ]; then
+    if [ -n "$HC_URL" ] || [ -n "$HC_PING_KEY" ]; then
+        # Con ping key, el slug es el nombre del CLUSTER: el mismo que usará el
+        # vigía. Y `?create=1` deja el check ya creado, así que esta prueba hace
+        # doble trabajo: valida la clave y da de alta el cluster.
+        if [ -n "$HC_URL" ]; then
+            _destino="$HC_URL"
+        else
+            _slug="$(basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-')"
+            _destino="https://hc-ping.com/${HC_PING_KEY}/${_slug%-}?create=1"
+        fi
         # Ping normal, NUNCA /fail: una prueba no debe dejar el check en rojo ni
         # despertar a nadie. Basta con que healthchecks.io lo registre.
         if curl -fsS -m 15 --retry 2 -X POST -H 'Content-Type: text/plain; charset=utf-8' \
                 --data-raw 'Prueba de configurar-avisos.sh: el canal funciona.' \
-                "$HC_URL" >/dev/null 2>&1; then
-            info "  healthchecks.io: OK (míralo en el panel del check)."
+                "$_destino" >/dev/null 2>&1; then
+            info "  healthchecks.io: OK (míralo en el panel del proyecto)."
         else
-            info "  healthchecks.io: FALLÓ. Revisa la URL de ping."
+            info "  healthchecks.io: FALLÓ. Revisa la ping key o la URL."
             _fallos=$(( _fallos + 1 ))
         fi
     fi
@@ -196,6 +236,8 @@ mkdir -p "$(dirname "$CONF")"
 {
     printf '# GENERADO por configurar-avisos.sh — valores de los hooks del vigía.\n'
     printf '# Contiene credenciales: chmod 600 y NUNCA se commitea.\n'
+    [ -n "$HC_PING_KEY" ] && printf 'HC_PING_KEY=%s\n' "$(entrecomillar "$HC_PING_KEY")"
+    [ -n "$HC_API_KEY" ]  && printf 'HC_API_KEY=%s\n' "$(entrecomillar "$HC_API_KEY")"
     [ -n "$HC_URL" ]    && printf 'HC_URL=%s\n' "$(entrecomillar "$HC_URL")"
     [ -n "$TG_TOKEN" ]  && printf 'TG_TOKEN=%s\n' "$(entrecomillar "$TG_TOKEN")"
     [ -n "$TG_CHAT" ]   && printf 'TG_CHAT=%s\n' "$(entrecomillar "$TG_CHAT")"
@@ -222,7 +264,7 @@ activar() {  # $1 = nombre del hook
 }
 
 info "Hooks en $HOOKS_DIR:"
-[ -n "$HC_URL" ]   && activar 10-healthchecks.sh
+{ [ -n "$HC_URL" ] || [ -n "$HC_PING_KEY" ]; } && activar 10-healthchecks.sh
 [ -n "$TG_TOKEN" ] && activar 20-telegram.sh
 
 info ""
@@ -231,4 +273,5 @@ if [ "$PROBAR" = "si" ]; then
 else
     info "Listo (sin probar los canales)."
 fi
-info "Para forzar una ronda ahora:  systemctl --user start gh-runner-vigilar.service"
+info "Para forzar una ronda ahora:  podman compose restart vigia"
+info "Para ver el informe:           podman compose logs -f vigia"
