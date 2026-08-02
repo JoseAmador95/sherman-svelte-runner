@@ -253,7 +253,24 @@ fi
 activar() {  # $1 = nombre del hook
     _act="${HOOKS_DIR}/$1"
     if [ -e "$_act" ]; then
-        info "  $1 ya estaba activo (no lo toco: puede que lo hayas ajustado)."
+        # NO se toca el CONTENIDO —puede llevar ajustes—, pero el bit de ejecución
+        # sí se garantiza: no es una personalización, es la diferencia entre que el
+        # hook corra y que no. `vigilar.sh` solo ejecuta lo que pasa `[ -x ]`, así
+        # que un hook sin ese bit es exactamente igual que no tenerlo.
+        #
+        # Caso real: una máquina llevaba semanas con este fichero puesto y sin `+x`.
+        # Este script decía "ya estaba activo" y el vigía decía "no hay hooks
+        # ejecutables": los dos ciertos, y nadie los ataba. El check de esa máquina
+        # seguía verde en el panel porque lo pingaba la PRUEBA DE CANAL de aquí
+        # abajo cada vez que se relanzaba el despliegue, así que parecía vigilada
+        # y no lo estaba en absoluto.
+        if [ -x "$_act" ]; then
+            info "  $1 ya estaba activo (no lo toco: puede que lo hayas ajustado)."
+        else
+            chmod 700 "$_act"
+            info "  $1 ya estaba, pero SIN permiso de ejecución: se lo pongo."
+            info "      (sin él, el vigía lo ignora y nadie recibe el informe)"
+        fi
         return 0
     fi
     [ -e "${_act}.ejemplo" ] || { info "  AVISO: no encuentro ${_act}.ejemplo; sáltate este canal."; return 0; }

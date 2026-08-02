@@ -150,6 +150,25 @@ jobs:
             || { echo "FALLO: pisó un hook ya ajustado"; exit 1; }
           echo "ok: idempotente, respeta lo que ya hubieras tocado"
 
+      # El bit de ejecución NO es una personalización: `vigilar.sh` solo corre lo
+      # que pasa `[ -x ]`, así que un hook sin él es idéntico a no tenerlo, y en
+      # silencio. Antes el `chmod` solo ocurría al CREAR el fichero, de modo que un
+      # hook ya presente sin permisos quedaba invisible para este script para
+      # siempre: decía "ya estaba activo" y se iba.
+      - name: A un hook ya presente SIN permiso de ejecución se lo devuelve
+        run: |
+          set -eu
+          export PATH="$AV/bin:$PATH"
+          chmod -x "$AV/hooks/10-healthchecks.sh"
+          sh scripts/configurar-avisos.sh --hooks "$AV/hooks" --conf "$AV/avisos.conf" \
+             --compose "$AV/despliegue/compose.yaml" --no-preguntar --hc-ping-key 'PKTEST' >/dev/null 2>&1
+          [ -x "$AV/hooks/10-healthchecks.sh" ] \
+            || { echo "FALLO: el hook sigue sin permiso de ejecución; el vigía lo ignoraría"; exit 1; }
+          # Y sin tocar el contenido: lo que se recupera es el permiso, no el fichero.
+          grep -q '# ajuste propio' "$AV/hooks/10-healthchecks.sh" \
+            || { echo "FALLO: al reponer el permiso pisó el contenido"; exit 1; }
+          echo "ok: repone el permiso de ejecución sin tocar lo que hubieras ajustado"
+
       - name: La prueba pingea EL MISMO check que el vigía, no uno paralelo
         run: |
           set -eu
