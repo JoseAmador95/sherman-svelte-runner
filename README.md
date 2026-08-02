@@ -127,7 +127,7 @@ Son **dos capas**, y cada una ve lo que la otra no:
 | | Dónde corre | Cada | Lo que solo ve ella |
 |---|---|---|---|
 | **Vigía de GitHub** (`vigilar-runners.yml`) | Actions | 1 h | Un runner registrado **sin la etiqueta** del fleet: vivo, pero sin tomar jobs. Y cruza **todas** las máquinas de una vez |
-| **Vigía del host** (`vigilar.sh`, de gh_runner) | cada máquina | 5 min | El runner **atascado** y el **reloj desfasado** — invisibles desde GitHub, donde el runner figura *online*. Y, por ausencia de latido, que la **máquina esté apagada** |
+| **Vigía del cluster** (servicio `vigia`, de gh_runner) | un contenedor **dentro de cada cluster** | 5 min | El runner **atascado** y el **reloj desfasado** — invisibles desde GitHub, donde el runner figura *online*. Y, por ausencia de latido, que la **máquina esté apagada** |
 
 Ninguna sustituye a la otra. La de GitHub mira el fleet **desde fuera** y por eso ve el registro
 entero; la del host mira **desde dentro** y por eso ve el proceso.
@@ -204,9 +204,21 @@ hablar con GitHub (figura *online* en el registro y no toma un solo job), el con
 el **reloj desfasado** —la causa raíz del incidente del 1 de agosto, en que un host iba 32 minutos
 atrasado y sus runners quedaron inservibles durante horas—.
 
-Lo instala el **`--vigilar`** del comando de [Desplegar](#desplegar), que deja el temporizador
-puesto y los hooks de aviso **como ejemplos**, sin activar: el vigía ya vigila, pero todavía no
-sabe por dónde avisarte. De eso se encarga el último tramo de ese mismo comando.
+Lo añade el **`--vigilar`** del comando de [Desplegar](#desplegar), que mete al compose el servicio
+**`vigia`** y deja los hooks de aviso **como ejemplos**, sin activar: el vigía ya vigila, pero
+todavía no sabe por dónde avisarte. De eso se encarga el último tramo de ese mismo comando.
+
+Es **un contenedor más del cluster**, no un servicio del sistema: sube y baja con `up -d` / `down`,
+funciona igual en Linux, macOS y Windows, y si la máquina se apaga cae con ella — que es justo lo
+que dispara el aviso por ausencia. Para verlo:
+
+```bash
+podman compose logs -f vigia
+```
+
+**Con varios clusters en una misma máquina**, cada uno lleva su propio vigía y su propio check, y
+el nombre del cluster (el del directorio del despliegue) encabeza cada aviso. No hay nada que
+configurar para eso.
 
 #### Configurar los avisos (Telegram y healthchecks.io)
 
@@ -217,9 +229,15 @@ rotar el token del bot, añadir un canal— es el mismo script suelto:
 sh scripts/configurar-avisos.sh
 ```
 
-Te pregunta la URL de ping y el token del bot, escribe `~/.config/gh-runner/avisos.conf`
-(**chmod 600**), activa los hooks que correspondan y **manda una prueba por cada canal**.
-Reusa lo que ya hubiera guardado, así que solo tienes que responder lo que quieras cambiar.
+Córrelo **en el directorio del despliegue**. Te pregunta la *ping key* de healthchecks.io y el token
+del bot, escribe `./vigia/avisos.conf` (**chmod 600**), activa los hooks que correspondan y **manda
+una prueba por cada canal**. Reusa lo que ya hubiera guardado, así que solo tienes que responder lo
+que quieras cambiar.
+
+La **ping key es del proyecto**, no de un check: la misma sirve para todas las máquinas, y el check
+de cada cluster **se crea solo** en su primer ping. Si además le das una **API key**, el vigía deja
+ese check con el periodo y el margen correctos; si no, ajústalos a mano una vez — el check
+autocreado nace con **periodo de 1 día**, y con eso un host caído tardaría un día en avisar.
 
 Esa prueba es el motivo de que exista el script. Un aviso mal cableado **no falla: calla** — y
 callar es exactamente lo que hace un fleet sano. Sin probarlo al instalarlo, el fallo aparece la
@@ -228,17 +246,18 @@ noche que algo se rompe, que es cuando ya no sirve de nada.
 Para automatizar varias máquinas, los valores también salen del entorno:
 
 ```bash
-HC_URL=… TG_TOKEN=… TG_CHAT=… sh scripts/configurar-avisos.sh --no-preguntar
+HC_PING_KEY=… TG_TOKEN=… TG_CHAT=… sh scripts/configurar-avisos.sh --no-preguntar
 ```
 
 > ⚠️ Por defecto **pregunta** en vez de aceptar banderas, igual que `deploy.sh` con el PAT: así el
 > token no queda en el historial del shell. Con `--no-preguntar` sí queda — úsalo solo desde un
 > script de aprovisionamiento.
 
-Una vez configurada una máquina, replicarla es copiar **un solo fichero**:
+Una vez configurada una máquina, replicarla es copiar **un solo fichero** — y con ping key el
+contenido es **idéntico** en todas, porque el check lo identifica el nombre del cluster:
 
 ```bash
-scp ~/.config/gh-runner/avisos.conf otro-host:~/.config/gh-runner/
+scp ./vigia/avisos.conf otro-host:~/ruta-del-despliegue/vigia/
 ```
 
 Los hooks lo leen solos; no hay que editarlos en cada host.
