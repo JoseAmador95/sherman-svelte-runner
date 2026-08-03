@@ -73,6 +73,14 @@ vuelve a preguntarte nada.
 > propio del proyecto es **`sherman`** (aquí `self-hosted` va explícito por claridad).
 > `deploy.sh` añade además `host:<hostname>`, para saber en qué máquina vive cada runner.
 >
+> **Máquina potente: añade `xl`.** En una máquina con mejores specs, despliega con
+> `--labels sherman,self-hosted,xl`. Los dos jobs que dominan el reloj de la CI (`unit` y
+> `estatico`) piden esos runners y caen al resto del fleet cuando no queda ninguno libre —
+> ver *La máquina potente* en `docs/ci-pipeline.md` de la app. **`--labels` reemplaza la
+> lista entera**, así que hay que repetir `sherman,self-hosted` o se pierden. Y **no** sirve
+> añadirlo a mano en Settings → Runners: son `--ephemeral` + `--replace`, se re-registran en
+> cada job con esa lista y el label puesto a mano desaparece en el siguiente ciclo.
+>
 > **Bootstrap.** Instala podman + un proveedor de compose y crea la machine si faltan
 > (`--no-bootstrap` para omitirlo). `curl -f` corta la cadena si la descarga falla, y
 > Compose se niega a arrancar si el YAML llega corrupto.
@@ -188,7 +196,7 @@ destino puede fijar su tema con `id:hilo` (p. ej. `-1001234567890:12`).
 > nota de arriba.
 
 Variables opcionales (con valor por defecto): `REPO_VIGILADO` (`demeneghi/sherman-svelte`),
-`CI_RUNNER_LABEL` (`sherman`), `RUNNERS_ESPERADOS` (`7`). `RUNNERS_ESPERADOS` es lo que detecta un
+`CI_RUNNER_LABEL` (`sherman`), `RUNNERS_ESPERADOS` (`12`). `RUNNERS_ESPERADOS` es lo que detecta un
 runner que **desapareció del listado** (contenedor muerto del todo), no solo uno `offline`.
 
 #### Probarlo
@@ -206,7 +214,7 @@ En local, sin enviar nada:
 
 ```bash
 SHERMAN_PAT=github_pat_… node scripts/vigilar-runners.mjs \
-  --repo=demeneghi/sherman-svelte --esperados=7 --dry-run
+  --repo=demeneghi/sherman-svelte --esperados=12 --dry-run
 ```
 
 Añade `--forzar` para ver el mensaje que mandaría aunque no haya cambios.

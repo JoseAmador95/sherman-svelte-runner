@@ -52,7 +52,7 @@ jobs:
     env:
       REPO_VIGILADO: ${{ vars.REPO_VIGILADO || 'demeneghi/sherman-svelte' }}
       CI_RUNNER_LABEL: ${{ vars.CI_RUNNER_LABEL || 'sherman' }}
-      RUNNERS_ESPERADOS: ${{ vars.RUNNERS_ESPERADOS || '7' }}
+      RUNNERS_ESPERADOS: ${{ vars.RUNNERS_ESPERADOS || '12' }}
     steps:
       - uses: actions/checkout@v4
 
