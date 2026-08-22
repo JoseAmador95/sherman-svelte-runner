@@ -13,6 +13,7 @@ con el toolchain del proyecto y sus servicios sidecar.
 | `.github/workflows/build-image.yml` | Build multi-arch (amd64+arm64) a `ghcr.io/<owner>/sherman-svelte-runner:latest`, con `schedule` diario para heredar los arreglos del base. |
 | `.github/workflows/vigilar-runners.yml` + `scripts/vigilar-runners.mjs` | Vigía horario del fleet: avisa por Telegram cuando un runner se cae o vuelve. Ver [Vigilancia del fleet](#vigilancia-del-fleet). |
 | `scripts/configurar-avisos.sh` | Deja listos los avisos del vigía **del host** (gh_runner) en una máquina: escribe su configuración, activa los hooks y **prueba cada canal**. |
+| `scripts/configurar-avisos.ps1` | Lo mismo en **PowerShell nativo**, para las máquinas Windows del fleet (ahí no hay `sh.exe` salvo que instales Git Bash y lo pongas a mano en el PATH). |
 
 > **Nombre del repo / owner.** Hoy el remoto es `JoseAmador95/svelte-runner`; hay que
 > **renombrarlo a `sherman-svelte-runner`** (el nombre de la imagen sale de
@@ -105,28 +106,44 @@ alcanzable por nombre, sin `--network`.
 
 ### Windows (PowerShell)
 
-Mismo flujo con `deploy.ps1`. El operador `&&` necesita **PowerShell 7+** (en 5.1 corre
-las dos instrucciones por separado). El token igual que en bash: `-Token`,
-`$env:ACCESS_TOKEN`, `gh auth token`, o te lo pregunta.
+**Los mismos cuatro tramos que en bash, en PowerShell nativo y sin Git Bash**: `deploy.ps1` y
+`configurar-avisos.ps1`. El operador `&&` necesita **PowerShell 7+** (en 5.1 corre las
+instrucciones por separado, y entonces conviene lanzarlas una a una). El token igual que en bash:
+`-Token`, `$env:ACCESS_TOKEN`, `gh auth token`, o te lo pregunta.
 
 ```powershell
 $ovr = 'https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/compose.override.yaml'
 $dep = 'https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.ps1'
+$avi = 'https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/scripts/configurar-avisos.ps1'
 
 Invoke-WebRequest -UseBasicParsing $ovr -OutFile compose.override.yaml &&
 & ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing $dep).Content)) `
     -Repo 'demeneghi/sherman-svelte' `
     -Image 'ghcr.io/joseamador95/sherman-svelte-runner:latest' `
     -Labels 'sherman,self-hosted' `
-    -Count 3 -Vigilar -Up
+    -Prefix 'sherman' `
+    -Count 3 -Vigilar -NoUp &&
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing $avi).Content)) &&
+podman compose up -d
 ```
 
-Los **avisos** se configuran aparte en Windows: `configurar-avisos.sh` es un script POSIX y lo
-ejecuta `sh.exe` de Git Bash, el mismo requisito que ya tiene el vigía ahí.
+**`-Prefix sherman` y `-NoUp` cuentan aquí igual que en Linux**: el prefijo es la identidad del
+fleet (nombra los runners *y* el check de healthchecks.io) y el `-NoUp` deja el arranque para el
+final, después de comprobar que los avisos llegan.
 
-```powershell
-sh.exe -c "$(Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/scripts/configurar-avisos.sh' | Select-Object -ExpandProperty Content)"
-```
+> **Nada de `sh.exe`.** Este tramo se hacía con el script POSIX vía
+> `sh.exe -c "$(…)"` y **fallaba con «sh.exe no existe»** en una máquina Windows normal: Git para
+> Windows solo añade su carpeta `cmd\` al PATH (git.exe, gh.exe), no `bin\`, así que `sh.exe` no
+> está ni teniéndolo instalado. `configurar-avisos.ps1` hace lo mismo en PowerShell —pregunta la
+> ping key, escribe `.\vigia\avisos.conf`, activa el hook y **manda la prueba**— y acepta los
+> mismos valores sin preguntar: `-HcPingKey`, `-HcApiKey`, `-HcUrl`, `-NoPreguntar`.
+
+> **El permiso de ejecución del hook.** En Windows no existe el bit `+x`, y si el *bind mount* no lo
+> simula el vigía ignora el hook **en silencio**. Si su informe dice «Hooks ignorados»:
+>
+> ```powershell
+> podman compose exec vigia chmod +x /etc/gh-runner/vigia/hooks.d/*.sh
+> ```
 
 ## Mantenerlo al día
 
@@ -252,6 +269,12 @@ rotar la ping key— es el mismo script suelto:
 
 ```bash
 sh scripts/configurar-avisos.sh
+```
+
+En **Windows**, el mismo trabajo lo hace el equivalente en PowerShell (no hace falta Git Bash):
+
+```powershell
+.\scripts\configurar-avisos.ps1
 ```
 
 Córrelo **en el directorio del despliegue**. Te pregunta la *ping key* de healthchecks.io, escribe

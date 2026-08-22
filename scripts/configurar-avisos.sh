@@ -191,7 +191,12 @@ if [ "$PROBAR" = "si" ]; then
 
             _slug="$(printf '%s-%s' "$_cl" "$_ho" \
                      | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | tr -s '-')"
-            _destino="https://hc-ping.com/${HC_PING_KEY}/${_slug%-}?create=1"
+            # La base sale de HC_BASE si la hay (healthchecks.io es self-hostable
+            # y el hook ya lee esa variable de avisos.conf). Fijarla aquí probaría
+            # el servicio público mientras el vigía pingea tu instancia: la prueba
+            # saldría verde sin decir nada del canal que de verdad se va a usar.
+            _base="${HC_BASE:-https://hc-ping.com}"
+            _destino="${_base%/}/${HC_PING_KEY}/${_slug%-}?create=1"
         fi
         # Ping normal, NUNCA /fail: una prueba no debe dejar el check en rojo ni
         # despertar a nadie. Basta con que healthchecks.io lo registre.
