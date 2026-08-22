@@ -202,3 +202,179 @@ jobs:
             echo "FALLO: hay algo que parece una credencial en el repo"; exit 1
           fi
           echo "ok: sin credenciales en el repo"
+
+  # La ruta de Windows no tenía prueba, y por eso llevaba rota sin que nadie lo
+  # notara: el README mandaba ejecutar el script POSIX con `sh.exe`, que no está
+  # en el PATH de una máquina Windows normal (Git para Windows solo añade `cmd\`).
+  # Este job corre el equivalente en PowerShell — pwsh y python3 vienen en el
+  # runner — con los mismos casos que el de arriba: lo que no se prueba, calla.
+  avisos-ps1:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Sintaxis y ninguna función llamada que no exista
+        shell: pwsh
+        run: |
+          $tokens = $null; $errores = $null
+          $ast = [System.Management.Automation.Language.Parser]::ParseFile(
+                   (Resolve-Path ./scripts/configurar-avisos.ps1).Path, [ref]$tokens, [ref]$errores)
+          if ($errores) {
+              $errores | ForEach-Object { Write-Output "FALLO (sintaxis): línea $($_.Extent.StartLineNumber): $($_.Message)" }
+              exit 1
+          }
+          $definidas = $ast.FindAll({ param($n)
+              $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true).Name
+          # Solo nombres con forma Verbo-Nombre: los comandos nativos (icacls,
+          # chmod, podman) no se resuelven en Linux y darían falsos positivos.
+          $faltan = $ast.FindAll({ param($n)
+                  $n -is [System.Management.Automation.Language.CommandAst] }, $true) |
+              ForEach-Object { $_.GetCommandName() } | Where-Object { $_ } |
+              Sort-Object -Unique | Where-Object {
+                  $_ -match '^[A-Z][a-zA-Z]*-[A-Za-z]+$' -and
+                  $definidas -notcontains $_ -and
+                  -not (Get-Command $_ -ErrorAction SilentlyContinue)
+              }
+          if ($faltan) {
+              Write-Output "FALLO: llama a funciones que no existen:"
+              $faltan | ForEach-Object { Write-Output "  - $_" }
+              exit 1
+          }
+          # El script tiene que correr también en Windows PowerShell 5.1: el
+          # README solo pide PowerShell 7 para el `&&` que encadena comandos.
+          if (Select-String -Path ./scripts/configurar-avisos.ps1 -Pattern '\?\s*\$\w+\s*:\s*' -Quiet) {
+              Write-Output "FALLO: operador ternario (PowerShell 7+); 5.1 no lo parsea"
+              exit 1
+          }
+          Write-Output "ok: parsea, no llama a nada inexistente y no usa sintaxis de PS7"
+
+      - name: Prepara un entorno de prueba (hooks y servidor de ping simulados)
+        run: |
+          set -eu
+          d="$RUNNER_TEMP/avps"; mkdir -p "$d/hooks" "$d/despliegue"
+          printf '#!/bin/sh\nexit 0\n' > "$d/hooks/10-healthchecks.sh.ejemplo"
+          # Mismo compose que emite `deploy.ps1 -Prefix sherman … -Vigilar`. El
+          # directorio se llama "despliegue" A PROPÓSITO: si el nombre del check
+          # volviera a salir de la carpeta, aquí saldría "despliegue".
+          cat > "$d/despliegue/compose.yaml" <<'YML'
+          services:
+            vigia:
+              environment:
+                VIGIA_CLUSTER: "sherman"
+                VIGIA_HOST: "mmJA"
+          YML
+          printf 'services:\n  vigia:\n    environment:\n      VIGIA_CLUSTER: "sherman"\n' > "$d/viejo.yaml"
+          # Servidor de ping simulado: apunta las URLs que le pidan y responde 500
+          # si la URL lleva la marca FALLA. HC_BASE es la misma variable que lee el
+          # hook para una instancia self-hosted, así que no hay camino de prueba
+          # que el código real no use.
+          cat > "$d/stub.py" <<'PY'
+          import http.server, sys
+          LOG = sys.argv[2]
+          class H(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  open(LOG, 'a').write(self.path + "\n")
+                  self.send_response(500 if 'FALLA' in self.path else 200)
+                  self.send_header('Content-Length', '2'); self.end_headers()
+                  self.wfile.write(b'ok')
+              def log_message(self, *a): pass
+          http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), H).serve_forever()
+          PY
+          nohup python3 "$d/stub.py" 8099 "$d/urls" >/dev/null 2>&1 &
+          for _ in 1 2 3 4 5; do sleep 1; done
+          {
+            echo "AVPS=$d"
+            echo "HC_BASE=http://127.0.0.1:8099"
+          } >> "$GITHUB_ENV"
+
+      - name: Rechaza configuraciones que no pueden funcionar
+        run: |
+          set -eu
+          S="pwsh -NoProfile -File scripts/configurar-avisos.ps1 -Hooks $AVPS/hooks -Conf $AVPS/avisos.conf -NoPreguntar"
+          rechaza() {  # $1 = descripción, resto = parámetros
+            _desc="$1"; shift
+            _rc=0; _out="$($S "$@" 2>&1 </dev/null)" || _rc=$?
+            [ "$_rc" -ne 0 ] || { echo "FALLO: aceptó una configuración inválida ($_desc)"; exit 1; }
+            # No basta con "salió distinto de cero": un script que no parsea también
+            # lo hace. Tiene que ser un rechazo EXPLÍCITO.
+            printf '%s\n' "$_out" | grep -q '^ERROR:' \
+              || { echo "FALLO: no rechazó ($_desc), falló por otra cosa: $_out"; exit 1; }
+            echo "ok: rechaza $_desc"
+          }
+          rechaza 'una URL que no es https' -HcUrl 'http://hc-ping.com/uuid'
+          rechaza 'ningún canal'
+          rechaza 'una ping key sin compose.yaml' -Compose "$AVPS/no-existe.yaml" -HcPingKey 'PKTEST'
+          rechaza 'un compose sin VIGIA_HOST'     -Compose "$AVPS/viejo.yaml"     -HcPingKey 'PKTEST'
+
+      - name: Configura, activa el hook y prueba el canal
+        run: |
+          set -eu
+          rm -f "$AVPS/avisos.conf" "$AVPS/urls" "$AVPS/hooks/10-healthchecks.sh"
+          pwsh -NoProfile -File scripts/configurar-avisos.ps1 -Hooks "$AVPS/hooks" \
+            -Conf "$AVPS/avisos.conf" -Compose "$AVPS/despliegue/compose.yaml" \
+            -NoPreguntar -HcPingKey 'PKTEST' </dev/null
+
+          # El fichero lo lee `.` de /bin/sh DENTRO del contenedor: con CRLF o con
+          # BOM, el valor llevaría un \r pegado o la primera línea no sería un
+          # comentario, y el ping iría a una URL que no existe.
+          grep -q $'\r' "$AVPS/avisos.conf" && { echo "FALLO: avisos.conf con CRLF"; exit 1; }
+          head -c 3 "$AVPS/avisos.conf" | grep -q $'\xef\xbb\xbf' && { echo "FALLO: avisos.conf con BOM"; exit 1; }
+          grep -q "^HC_PING_KEY='PKTEST'$" "$AVPS/avisos.conf" || { echo "FALLO: HC_PING_KEY"; exit 1; }
+          [ -x "$AVPS/hooks/10-healthchecks.sh" ] || { echo "FALLO: no activó el hook"; exit 1; }
+
+          # La misma identidad que el .sh: el check es del cluster EN esta máquina,
+          # y sale del compose, no del nombre del directorio. Los dos scripts y el
+          # hook de gh_runner son los tres extremos del mismo contrato.
+          url="$(head -n1 "$AVPS/urls")"
+          [ "$url" = '/PKTEST/sherman-mmja?create=1' ] \
+            || { echo "FALLO: pingeó '$url', se esperaba '/PKTEST/sherman-mmja?create=1'"; exit 1; }
+          echo "ok: escribe la configuración, activa el hook y pingea el check del vigía"
+
+      - name: Un canal que no responde sale en ROJO y no pisa lo que funcionaba
+        run: |
+          set -eu
+          if pwsh -NoProfile -File scripts/configurar-avisos.ps1 -Hooks "$AVPS/hooks" \
+               -Conf "$AVPS/avisos.conf" -Compose "$AVPS/despliegue/compose.yaml" \
+               -NoPreguntar -HcPingKey 'PKFALLA' >/dev/null 2>&1 </dev/null; then
+            echo "FALLO: un canal roto pasó como bueno"; exit 1
+          fi
+          grep -q 'PKFALLA' "$AVPS/avisos.conf" && { echo "FALLO: guardó una configuración que acababa de declarar rota"; exit 1; }
+          grep -q "^HC_PING_KEY='PKTEST'$" "$AVPS/avisos.conf" \
+            || { echo "FALLO: pisó la configuración que sí funcionaba"; exit 1; }
+          echo "ok: un intento fallido deja intacto lo que ya funcionaba"
+
+      - name: Re-ejecutarlo no vuelve a pedir nada, ni pisa un hook ajustado
+        run: |
+          set -eu
+          echo '# ajuste propio' >> "$AVPS/hooks/10-healthchecks.sh"
+          chmod -x "$AVPS/hooks/10-healthchecks.sh"
+          salida="$(pwsh -NoProfile -File scripts/configurar-avisos.ps1 -Hooks "$AVPS/hooks" \
+                      -Conf "$AVPS/avisos.conf" -Compose "$AVPS/despliegue/compose.yaml" \
+                      -NoPreguntar 2>&1 </dev/null)"
+          printf '%s\n' "$salida" | grep -q 'Reusando' || {
+            echo "FALLO: no reusó la configuración previa"; printf '%s\n' "$salida"; exit 1; }
+          grep -q '# ajuste propio' "$AVPS/hooks/10-healthchecks.sh" \
+            || { echo "FALLO: pisó un hook ya ajustado"; exit 1; }
+          # `vigilar.sh` solo ejecuta lo que pasa `[ -x ]`: un hook sin ese bit es
+          # idéntico a no tenerlo, y en silencio.
+          [ -x "$AVPS/hooks/10-healthchecks.sh" ] \
+            || { echo "FALLO: el hook sigue sin permiso de ejecución"; exit 1; }
+          echo "ok: re-ejecutable, idempotente y repone el permiso de ejecución"
+
+      # Los dos scripts escriben el MISMO fichero, que leen los mismos hooks. Si
+      # uno cambiara de formato, la máquina configurada desde la otra shell se
+      # quedaría sin avisos sin que nada fallara.
+      - name: El .sh y el .ps1 escriben el mismo formato
+        run: |
+          set -eu
+          mkdir -p "$AVPS/bin"
+          printf '#!/bin/sh\nexit 0\n' > "$AVPS/bin/curl"; chmod +x "$AVPS/bin/curl"
+          rm -f "$AVPS/conf-sh" "$AVPS/conf-ps"
+          PATH="$AVPS/bin:$PATH" sh scripts/configurar-avisos.sh --hooks "$AVPS/hooks" \
+            --conf "$AVPS/conf-sh" --no-preguntar --hc-url 'https://hc-ping.com/uuid' >/dev/null 2>&1
+          pwsh -NoProfile -File scripts/configurar-avisos.ps1 -Hooks "$AVPS/hooks" \
+            -Conf "$AVPS/conf-ps" -NoPreguntar -NoProbar -HcUrl 'https://hc-ping.com/uuid' >/dev/null 2>&1 </dev/null
+          # Se comparan los valores, no las cabeceras (cada script firma la suya).
+          diff -u <(grep -v '^#' "$AVPS/conf-sh") <(grep -v '^#' "$AVPS/conf-ps") \
+            || { echo "FALLO: los dos scripts escriben avisos.conf distinto"; exit 1; }
+          echo "ok: mismo formato de avisos.conf desde las dos shells"
