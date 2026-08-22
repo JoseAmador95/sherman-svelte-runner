@@ -107,9 +107,13 @@ alcanzable por nombre, sin `--network`.
 ### Windows (PowerShell)
 
 **Los mismos cuatro tramos que en bash, en PowerShell nativo y sin Git Bash**: `deploy.ps1` y
-`configurar-avisos.ps1`. El operador `&&` necesita **PowerShell 7+** (en 5.1 corre las
-instrucciones por separado, y entonces conviene lanzarlas una a una). El token igual que en bash:
-`-Token`, `$env:ACCESS_TOKEN`, `gh auth token`, o te lo pregunta.
+`configurar-avisos.ps1`. El token igual que en bash: `-Token`, `$env:ACCESS_TOKEN`,
+`gh auth token`, o te lo pregunta.
+
+**Comprueba primero qué shell tienes** — `$PSVersionTable.PSVersion`. Con **5.x** estás en
+*Windows PowerShell* (el icono azul, el que trae Windows) y el bloque de abajo **no** te sirve:
+`&&` no existe ahí y el pegado muere con *«El token '&&' no es un separador de instrucciones
+válido en esta versión»*. Ve a [PowerShell 5.1](#windows-powershell-51), justo debajo.
 
 ```powershell
 $ovr = 'https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/compose.override.yaml'
@@ -130,6 +134,44 @@ podman compose up -d
 **`-Prefix sherman` y `-NoUp` cuentan aquí igual que en Linux**: el prefijo es la identidad del
 fleet (nombra los runners *y* el check de healthchecks.io) y el `-NoUp` deja el arranque para el
 final, después de comprobar que los avisos llegan.
+
+#### Windows PowerShell 5.1
+
+`&&` llegó en PowerShell 7; en 5.1 hay que lanzar los tramos **uno a uno**, mirando que cada uno
+acabe bien antes de pasar al siguiente (eso es justo lo que hacía el `&&`). Los scripts sí corren
+en 5.1 tal cual: lo único que falta ahí es el operador.
+
+```powershell
+$ovr = 'https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/compose.override.yaml'
+$dep = 'https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.ps1'
+$avi = 'https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/scripts/configurar-avisos.ps1'
+
+# 1. El override de Verdaccio.
+Invoke-WebRequest -UseBasicParsing $ovr -OutFile compose.override.yaml
+
+# 2. Genera el despliegue con el vigía, SIN arrancarlo (te pedirá el PAT).
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing $dep).Content)) `
+    -Repo 'demeneghi/sherman-svelte' `
+    -Image 'ghcr.io/joseamador95/sherman-svelte-runner:latest' `
+    -Labels 'sherman,self-hosted' `
+    -Prefix 'sherman' `
+    -Count 3 -Vigilar -NoUp
+
+# 3. Los avisos (te pedirá la ping key y mandará una prueba).
+& ([scriptblock]::Create((Invoke-WebRequest -UseBasicParsing $avi).Content))
+
+# 4. Solo si el paso 3 dijo OK:
+podman compose up -d
+```
+
+> **Si un paso falla, puede cerrarse la consola.** El `exit` de un script ejecutado como
+> `& ([scriptblock]::Create(…))` termina la sesión, no solo el script, así que un error (PAT
+> inválido, ping key mal pegada) puede llevarse la ventana en vez de devolverte el prompt. Vuelve a
+> abrirla y repite **desde el paso que falló**: los dos scripts son **re-ejecutables** y el de
+> avisos reusa lo que ya hubiera guardado.
+>
+> **Si prefieres el bloque de arriba**, instala PowerShell 7 y trabaja desde ahí:
+> `winget install Microsoft.PowerShell`, luego abre `pwsh`.
 
 > **Nada de `sh.exe`.** Este tramo se hacía con el script POSIX vía
 > `sh.exe -c "$(…)"` y **fallaba con «sh.exe no existe»** en una máquina Windows normal: Git para
