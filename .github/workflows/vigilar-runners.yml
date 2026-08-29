@@ -24,7 +24,22 @@ name: vigilar-runners
 #   TELEGRAM_THREAD_ID  Opcional: solo para grupos con temas.
 #
 # VARIABLES (opcionales, con valor por defecto abajo):
-#   REPO_VIGILADO · CI_RUNNER_LABEL · RUNNERS_ESPERADOS
+#   REPO_VIGILADO · CI_RUNNER_LABEL · RUNNERS_ESPERADOS · RUNNERS_ESPERADOS_POR
+#
+#   RUNNERS_ESPERADOS_POR  Reparto por plataforma: «linux=13,macos=2!,escritorio=1». El sufijo `!`
+#                       marca el grupo como efímero (las VMs de Tart se destruyen y se recrean entre
+#                       jobs, y durante 60-90 s no hay runner registrado), y su déficit se confirma
+#                       en DOS rondas antes de avisar. La caída real de un Mac la ve antes el vigía
+#                       del host (`vigilar.sh`, ronda de 5 min), que mira el slot y no el registro.
+#
+#                       OJO CON `linux=13`, y no 12: el runner de escritorio corre en un contenedor,
+#                       así que GitHub le pone `Linux` además de `escritorio` y cuenta en LOS DOS
+#                       grupos. Con `linux=12` sobraba uno, y entonces perder un runner Linux del
+#                       registro dejaba el grupo en 12 -es decir, en su cuenta esperada- y el aviso
+#                       NO sonaba: el de escritorio tapaba el hueco. El caso está fijado en
+#                       `scripts/vigilar-runners.test.mjs`.
+#                       OJO al ajustarlo: el runner de escritorio es un contenedor, así que GitHub
+#                       le pone también la etiqueta `Linux` y cuenta en los dos grupos.
 
 on:
   schedule:
@@ -53,6 +68,7 @@ jobs:
       REPO_VIGILADO: ${{ vars.REPO_VIGILADO || 'demeneghi/sherman-svelte' }}
       CI_RUNNER_LABEL: ${{ vars.CI_RUNNER_LABEL || 'sherman' }}
       RUNNERS_ESPERADOS: ${{ vars.RUNNERS_ESPERADOS || '12' }}
+      RUNNERS_ESPERADOS_POR: ${{ vars.RUNNERS_ESPERADOS_POR || 'linux=13,macos=2!,escritorio=1' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -88,5 +104,6 @@ jobs:
             --repo="$REPO_VIGILADO" \
             --etiqueta="$CI_RUNNER_LABEL" \
             --esperados="$RUNNERS_ESPERADOS" \
+            --esperados-por="$RUNNERS_ESPERADOS_POR" \
             --estado=.estado-fleet.json \
             ${{ inputs.forzar && '--forzar' || '' }}

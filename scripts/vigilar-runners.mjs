@@ -17,6 +17,11 @@
  * escribe en `--estado=<ruta>`; el workflow los persiste con `actions/cache`. Sin estado previo se
  * trata como primera ronda: avisa solo si hay algo caído.
  *
+ * POR PLATAFORMA: `RUNNERS_ESPERADOS_POR` («linux=12,macos=2!,escritorio=1») reparte lo esperado
+ * entre grupos, porque con un contador plano un Mac caído se diluye en la cuenta global. El sufijo
+ * `!` marca el grupo como efímero (VMs de Tart que rotan entre jobs) y su déficit se confirma en
+ * dos rondas: ver `evaluarGrupos`. Sin la variable, todo se comporta exactamente como antes.
+ *
  * Uso local (no envía nada):
  *   SHERMAN_PAT=github_pat_… node scripts/vigilar-runners.mjs --repo=demeneghi/sherman-svelte --dry-run
  */
@@ -65,50 +70,222 @@ export function estadoFleet(runners, etiqueta) {
 }
 
 /**
+ * Reparte el fleet por plataforma. La clave de cada grupo es una etiqueta que debe estar ADEMÁS de
+ * `etiqueta` (AND), y su valor configurado es cuántos se esperan ahí.
+ *
+ * El truco que evita re-desplegar los 12 runners que ya corren: `linux` y `macos` son etiquetas que
+ * **GitHub añade solo** al registrar el runner (`Linux`, `macOS`), y la comparación va en minúsculas
+ * como en `estadoFleet`. Solo `escritorio` es etiqueta nuestra, y solo la lleva el runner nuevo.
+ *
+ * `estadoFleet` se deja intacta a propósito: es la que decide el aviso global y ya está probada.
+ */
+export function estadoPorGrupo(runners, etiqueta, grupos) {
+	const objetivo = String(etiqueta).toLowerCase();
+	const nombres = Array.isArray(grupos) ? grupos : Object.keys(grupos ?? {});
+	const salida = {};
+	for (const nombre of nombres) {
+		const marca = String(nombre).toLowerCase();
+		const delGrupo = (runners ?? []).filter((r) => {
+			const etiquetas = (r?.labels ?? []).map((l) => String(l?.name ?? '').toLowerCase());
+			return etiquetas.includes(objetivo) && etiquetas.includes(marca);
+		});
+		salida[nombre] = {
+			total: delGrupo.length,
+			online: delGrupo.filter((r) => r?.status === 'online').length,
+			ocupados: delGrupo.filter((r) => r?.status === 'online' && r?.busy).length,
+			caidos: delGrupo
+				.filter((r) => r?.status !== 'online')
+				.map((r) => r?.name ?? '(sin nombre)')
+				.sort()
+		};
+	}
+	return salida;
+}
+
+/**
+ * Lee `RUNNERS_ESPERADOS_POR`: «linux=12,macos=2!,escritorio=1».
+ *
+ * El sufijo `!` marca el grupo como EFÍMERO (sus runners se destruyen y se vuelven a crear entre
+ * job y job). Devuelve `null` si no hay nada configurado, y ese `null` es el que conserva el
+ * comportamiento anterior byte a byte: sin grupos, ni la huella ni el mensaje cambian.
+ */
+export function parsearGrupos(cadena) {
+	const texto = String(cadena ?? '').trim();
+	if (!texto) return null;
+	const grupos = {};
+	for (const parte of texto.split(',')) {
+		const entrada = parte.trim();
+		if (!entrada) continue;
+		const sep = entrada.indexOf('=');
+		const nombre = (sep >= 0 ? entrada.slice(0, sep) : entrada).trim().toLowerCase();
+		let valor = (sep >= 0 ? entrada.slice(sep + 1) : '').trim();
+		const efimero = valor.endsWith('!');
+		if (efimero) valor = valor.slice(0, -1).trim();
+		if (!nombre) continue;
+		grupos[nombre] = { esperados: Number(valor) || 0, efimero };
+	}
+	return Object.keys(grupos).length > 0 ? grupos : null;
+}
+
+/**
+ * Contrasta lo esperado por grupo con lo que hay, aplicando la CONFIRMACIÓN EN DOS RONDAS de los
+ * grupos efímeros.
+ *
+ * Por qué esa espera: entre job y job un slot de macOS rota — la VM de Tart se destruye y se crea
+ * otra, y durante 60-90 s no hay ningún runner registrado. Con el cron horario eso es ~2,5 % de
+ * probabilidad por slot de muestrear justo el hueco, o sea un falso «Falta un runner» cada pocas
+ * semanas por slot. Un déficit en un grupo marcado con `!` solo se anuncia si aparece en DOS rondas
+ * seguidas (`pendiente` viaja en el estado persistido).
+ *
+ * Las 2 h de latencia que eso mete para una caída REAL de macOS son aceptables porque el camino
+ * rápido lo cubre otra capa: el vigía del host (`vigilar.sh` de gh_runner, ronda de 5 min) mira el
+ * SLOT —el proceso y la VM en la máquina—, no el registro en GitHub, así que un Mac apagado de
+ * verdad se detecta ahí en minutos. Este vigía es la red de seguridad, no el primer aviso.
+ *
+ * Mientras el hueco no está confirmado se cuenta como PRESENTE (`huecoNoConfirmado`), o el fleet se
+ * declararía enfermo por una rotación. Y `totalEfimeros` es lo que la huella descuenta del total
+ * (ver `decidirAviso`): sin eso, el vaivén normal de las VMs movería la huella en cada rotación y el
+ * anti-spam hablaría igual, que es justo lo que esta espera existe para evitar.
+ */
+export function evaluarGrupos({ grupos, porGrupo, previo }) {
+	if (!grupos) {
+		return { faltanPorGrupo: {}, pendiente: [], huecoNoConfirmado: 0, totalEfimeros: 0 };
+	}
+	const pendientePrevio = new Set(Array.isArray(previo?.pendiente) ? previo.pendiente : []);
+	const faltanPorGrupo = {};
+	const pendiente = [];
+	let huecoNoConfirmado = 0;
+	let totalEfimeros = 0;
+
+	for (const [nombre, conf] of Object.entries(grupos)) {
+		const esperados = Number(conf?.esperados) || 0;
+		if (esperados <= 0) continue;
+		const hay = porGrupo?.[nombre]?.total ?? 0;
+		if (conf?.efimero) totalEfimeros += hay;
+		const faltan = Math.max(0, esperados - hay);
+		if (faltan === 0) continue;
+		if (conf?.efimero) {
+			pendiente.push(nombre);
+			if (!pendientePrevio.has(nombre)) {
+				huecoNoConfirmado += faltan;
+				continue;
+			}
+		}
+		faltanPorGrupo[nombre] = faltan;
+	}
+	pendiente.sort();
+	return { faltanPorGrupo, pendiente, huecoNoConfirmado, totalEfimeros };
+}
+
+/** Nombres tal y como se escriben en el mensaje; el resto del mundo los ve en minúsculas. */
+const NOMBRE_GRUPO = { linux: 'Linux', macos: 'macOS', escritorio: 'Escritorio' };
+
+/**
+ * «Linux 12/12 · macOS 2/2 · Escritorio 1/1». Cadena vacía sin grupos configurados: así el mensaje
+ * de siempre no gana una línea en blanco.
+ */
+export function lineaDesglose(porGrupo, grupos) {
+	if (!grupos) return '';
+	const trozos = [];
+	for (const [nombre, conf] of Object.entries(grupos)) {
+		const esperados = Number(conf?.esperados) || 0;
+		const online = porGrupo?.[nombre]?.online ?? 0;
+		const etiqueta = NOMBRE_GRUPO[nombre] ?? nombre;
+		trozos.push(`${escaparHtml(etiqueta)} <code>${online}/${esperados}</code>`);
+	}
+	return trozos.join(' · ');
+}
+
+/**
  * Decide si toca hablar.
  *
  * `sano` compara contra lo ESPERADO, no contra lo registrado: un runner que desaparece del listado
  * (el contenedor murió del todo y se desregistró) es tan preocupante como uno `offline`, y mirando
  * solo `caidos` pasaría inadvertido.
  */
-export function decidirAviso({ estado, esperados, previo, forzar = false }) {
-	const faltan = esperados > 0 ? Math.max(0, esperados - estado.total) : 0;
-	const sano = estado.caidos.length === 0 && faltan === 0 && estado.online > 0;
-	const huella = JSON.stringify({ caidos: estado.caidos, total: estado.total });
+export function decidirAviso({
+	estado,
+	esperados,
+	previo,
+	forzar = false,
+	grupos = null,
+	porGrupo = null
+}) {
+	const { faltanPorGrupo, pendiente, huecoNoConfirmado, totalEfimeros } = evaluarGrupos({
+		grupos,
+		porGrupo,
+		previo
+	});
+	// El hueco de una rotación aún sin confirmar se cuenta como si el runner estuviera: ver
+	// `evaluarGrupos`. Sin esto, bajar el `total` ya delataría la rotación en la primera ronda.
+	const totalEfectivo = estado.total + huecoNoConfirmado;
+	const faltan = esperados > 0 ? Math.max(0, esperados - totalEfectivo) : 0;
+	const faltanPorGrupoTotal = Object.values(faltanPorGrupo).reduce((a, b) => a + b, 0);
+	const sano =
+		estado.caidos.length === 0 && faltan === 0 && faltanPorGrupoTotal === 0 && estado.online > 0;
+
+	// La huella lleva el déficit POR GRUPO, y no solo el total, porque con dos plataformas el
+	// contador plano silencia caídas reales: un Mac que se cae mientras vuelve un Linux deja
+	// `caidos` y `total` idénticos, y el aviso no sonaría nunca. El precio, que hay que aceptar y
+	// no es un fallo: la primera ronda tras desplegar este cambio ve una huella distinta a la
+	// guardada por la versión anterior, así que manda UN mensaje de más y luego se calla.
+	//
+	// Sin grupos configurados la clave ni siquiera se añade, así que la huella es byte a byte la de
+	// antes y las cachés existentes siguen valiendo.
+	// Y el `total` de la huella DESCUENTA los runners de los grupos efímeros: su alta y baja continua
+	// es el funcionamiento normal, no una novedad, así que contarlos ahí movería la huella en cada
+	// rotación y hablaría igual aunque el déficit siguiera sin confirmar. Lo que de verdad falta en
+	// esos grupos lo dice `faltanPorGrupo`, y solo cuando ya está confirmado.
+	const huella = JSON.stringify(
+		grupos
+			? { caidos: estado.caidos, total: estado.total - totalEfimeros, faltanPorGrupo }
+			: { caidos: estado.caidos, total: estado.total }
+	);
 	const primeraRonda = previo == null;
+	const comun = { sano, huella, faltan, faltanPorGrupo, pendiente };
 
 	// `forzar` salta TODO el anti-spam, y esa es justo su razón de ser: sin él, lanzar el vigía a
 	// mano para comprobar que los secretos funcionan devuelve un job verde y silencio, que es
 	// indistinguible de tenerlos mal puestos. Solo cambia si se HABLA; el estado se registra igual,
 	// así que una comprobación manual no descoloca el anti-spam de la siguiente ronda.
-	if (forzar) return { avisar: true, sano, huella, faltan };
+	if (forzar) return { avisar: true, ...comun };
 
-	if (!primeraRonda && previo.huella === huella) return { avisar: false, sano, huella, faltan };
+	if (!primeraRonda && previo.huella === huella) return { avisar: false, ...comun };
 	// Primera ronda con todo bien: no se anuncia un «va todo bien» que nadie pidió.
-	if (sano && primeraRonda) return { avisar: false, sano, huella, faltan };
+	if (sano && primeraRonda) return { avisar: false, ...comun };
 	// Recuperación: solo se anuncia si la ronda anterior estaba mal.
-	if (sano && previo?.sano !== false) return { avisar: false, sano, huella, faltan };
-	return { avisar: true, sano, huella, faltan };
+	if (sano && previo?.sano !== false) return { avisar: false, ...comun };
+	return { avisar: true, ...comun };
 }
 
-export function construirMensaje({ repo, estado, esperados, faltan, sano, forzado = false }) {
+export function construirMensaje({
+	repo,
+	estado,
+	esperados,
+	faltan,
+	sano,
+	forzado = false,
+	grupos = null,
+	porGrupo = null,
+	faltanPorGrupo = {}
+}) {
+	// Cadena vacía sin grupos configurados, y entonces nada de esto se añade: el mensaje sale
+	// idéntico al de siempre.
+	const desglose = lineaDesglose(porGrupo, grupos);
 	if (sano) {
 		// Con el fleet sano hay dos motivos para hablar, y NO dicen lo mismo: una recuperación
 		// («volvieron») o una comprobación que alguien pidió a mano. Anunciar «Runners de vuelta»
 		// cuando nunca se cayó nada haría dudar de si hubo una caída que no se vio.
-		return forzado
-			? [
-					'🔎 <b>Comprobación del vigía</b>',
-					'',
-					`<b>${escaparHtml(repo)}</b> — los <code>${estado.total}</code> runners están en línea.`,
-					'',
-					'Lo pediste a mano; si lees esto, el aviso por Telegram funciona.'
-				].join('\n')
-			: [
-					'✅ <b>Runners de vuelta</b>',
-					'',
-					`<b>${escaparHtml(repo)}</b> — los <code>${estado.total}</code> runners están en línea.`
-				].join('\n');
+		const cabecera = [
+			forzado ? '🔎 <b>Comprobación del vigía</b>' : '✅ <b>Runners de vuelta</b>',
+			'',
+			`<b>${escaparHtml(repo)}</b> — los <code>${estado.total}</code> runners están en línea.`
+		];
+		if (desglose) cabecera.push(desglose);
+		if (forzado) {
+			cabecera.push('', 'Lo pediste a mano; si lees esto, el aviso por Telegram funciona.');
+		}
+		return cabecera.join('\n');
 	}
 
 	const lineas = [
@@ -118,6 +295,7 @@ export function construirMensaje({ repo, estado, esperados, faltan, sano, forzad
 			(esperados > 0 ? ` de <code>${esperados}</code> esperados` : '') +
 			`, <code>${estado.ocupados}</code> ${estado.ocupados === 1 ? 'ocupado' : 'ocupados'}.`
 	];
+	if (desglose) lineas.push(desglose);
 
 	if (estado.caidos.length > 0) {
 		lineas.push('');
@@ -127,6 +305,17 @@ export function construirMensaje({ repo, estado, esperados, faltan, sano, forzad
 		}
 		const resto = estado.caidos.length - MAX_NOMBRES_EN_MENSAJE;
 		if (resto > 0) lineas.push(`· …y ${resto} más`);
+	}
+	const cortos = Object.entries(faltanPorGrupo ?? {});
+	if (cortos.length > 0) {
+		lineas.push('');
+		lineas.push(
+			'Sin registrar por plataforma: ' +
+				cortos
+					.map(([g, n]) => `<code>${n}</code> en ${escaparHtml(NOMBRE_GRUPO[g] ?? g)}`)
+					.join(', ') +
+				'.'
+		);
 	}
 	if (faltan > 0) {
 		lineas.push('');
@@ -272,6 +461,8 @@ async function main() {
 	const token = (process.env.SHERMAN_PAT ?? process.env.GH_TOKEN ?? '').trim();
 	const etiqueta = (leerBandera('etiqueta') ?? ETIQUETA_POR_DEFECTO).trim();
 	const esperados = Number(leerBandera('esperados') ?? process.env.RUNNERS_ESPERADOS ?? 0) || 0;
+	// `null` si no está configurada, y ese `null` es el que deja todo (huella y mensaje) como antes.
+	const grupos = parsearGrupos(leerBandera('esperados-por') ?? process.env.RUNNERS_ESPERADOS_POR);
 	const rutaEstado = leerBandera('estado');
 	const previo = leerEstadoPrevio(leerBandera('estado-previo') ?? rutaEstado);
 
@@ -285,8 +476,11 @@ async function main() {
 	}
 
 	let estado;
+	let porGrupo = null;
 	try {
-		estado = estadoFleet(await consultarRunners(repo, token), etiqueta);
+		const runners = await consultarRunners(repo, token);
+		estado = estadoFleet(runners, etiqueta);
+		if (grupos) porGrupo = estadoPorGrupo(runners, etiqueta, grupos);
 	} catch (error) {
 		// Un fallo de la API no es un fleet caído: avisar de eso sería un falso positivo cada vez
 		// que GitHub tenga un mal minuto. Se registra y se sale en verde sin tocar el estado.
@@ -299,11 +493,31 @@ async function main() {
 			(esperados > 0 ? ` (${esperados} esperados)` : '') +
 			(estado.caidos.length > 0 ? ` · fuera: ${estado.caidos.join(', ')}` : '')
 	);
+	if (grupos) {
+		console.log(
+			Object.entries(grupos)
+				.map(
+					([g, c]) =>
+						`  ${g}: ${porGrupo?.[g]?.online ?? 0}/${c.esperados} registrados ${porGrupo?.[g]?.total ?? 0}` +
+						(c.efimero ? ' (efímero: un déficit se confirma en la ronda siguiente)' : '')
+				)
+				.join('\n')
+		);
+	}
 
-	const { avisar, sano, huella, faltan } = decidirAviso({ estado, esperados, previo, forzar });
+	const { avisar, sano, huella, faltan, faltanPorGrupo, pendiente } = decidirAviso({
+		estado,
+		esperados,
+		previo,
+		forzar,
+		grupos,
+		porGrupo
+	});
 
 	if (rutaEstado && !soloPrueba) {
-		writeFileSync(rutaEstado, JSON.stringify({ huella, sano }), 'utf8');
+		// `pendiente` es lo que hace posible la confirmación en dos rondas de los grupos efímeros: sin
+		// persistirlo, cada ronda vería el hueco de rotación como si fuera el primero y jamás hablaría.
+		writeFileSync(rutaEstado, JSON.stringify({ huella, sano, pendiente }), 'utf8');
 	}
 
 	if (!avisar) {
@@ -314,7 +528,17 @@ async function main() {
 	}
 
 	if (forzar) console.log('Aviso forzado: se manda aunque el estado no haya cambiado.');
-	const mensaje = construirMensaje({ repo, estado, esperados, faltan, sano, forzado: forzar });
+	const mensaje = construirMensaje({
+		repo,
+		estado,
+		esperados,
+		faltan,
+		sano,
+		forzado: forzar,
+		grupos,
+		porGrupo,
+		faltanPorGrupo
+	});
 	if (soloPrueba) {
 		console.log('\n--- mensaje (dry-run) ---\n' + mensaje + '\n-------------------------');
 		return;

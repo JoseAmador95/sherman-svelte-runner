@@ -26,6 +26,23 @@ jobs:
         with:
           severity: warning
 
+  # Los scripts del vigía no tenían NINGUNA prueba, y son de la misma familia de fallo silencioso
+  # que `configurar-avisos.sh`: si `decidirAviso` deja de hablar, el cron sale verde y no llega
+  # ningún mensaje — indistinguible de un fleet sano. Ahora que el fleet mezcla contenedores Linux,
+  # VMs de macOS que rotan entre jobs y el runner de escritorio, el reparto por plataforma es
+  # justo la parte con lógica que puede romperse sin que nadie lo note.
+  vigilancia:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      # Sin dependencias ni `package.json`: `node --test` viene en la stdlib y los scripts solo
+      # usan `fetch`. Las pruebas tocan únicamente las funciones puras, así que no hay red.
+      - name: Pruebas de las funciones puras del vigía
+        run: node --test scripts/*.test.mjs
+
   avisos:
     runs-on: ubuntu-latest
     steps:

@@ -13,7 +13,7 @@
  */
 import { appendFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
-import { consultarRunners } from './vigilar-runners.mjs';
+import { consultarRunners, estadoPorGrupo, parsearGrupos } from './vigilar-runners.mjs';
 
 const ETIQUETA_POR_DEFECTO = 'sherman';
 
@@ -31,7 +31,7 @@ function celda(texto) {
 /**
  * Arma el informe en Markdown. Puro: recibe el inventario ya consultado, así se puede probar sin red.
  */
-export function construirInforme({ repo, runners, etiqueta, esperados }) {
+export function construirInforme({ repo, runners, etiqueta, esperados, grupos = null }) {
 	const objetivo = String(etiqueta).toLowerCase();
 	const marcados = (runners ?? []).map((r) => ({
 		nombre: r?.name ?? '(sin nombre)',
@@ -40,6 +40,13 @@ export function construirInforme({ repo, runners, etiqueta, esperados }) {
 		delFleet: (r?.labels ?? []).some((l) => String(l?.name ?? '').toLowerCase() === objetivo),
 		etiquetas: (r?.labels ?? []).map((l) => l?.name).filter(Boolean)
 	}));
+	// A qué grupo pertenece cada runner. Se resuelve con las MISMAS etiquetas que usa el vigía para
+	// contar, así que si aquí sale «—» es que allí tampoco cuenta para ningún grupo.
+	const nombresGrupo = grupos ? Object.keys(grupos) : [];
+	for (const r of marcados) {
+		const suyas = r.etiquetas.map((e) => String(e).toLowerCase());
+		r.grupo = nombresGrupo.find((g) => suyas.includes(g.toLowerCase())) ?? null;
+	}
 	marcados.sort((a, b) => a.nombre.localeCompare(b.nombre));
 
 	const delFleet = marcados.filter((r) => r.delFleet);
@@ -57,17 +64,40 @@ export function construirInforme({ repo, runners, etiqueta, esperados }) {
 		''
 	];
 
+	// Resumen por plataforma: el conteo global no distingue un Mac caído de un Linux caído, y son
+	// dos problemas distintos (dos slots de macOS son un límite duro de licencia de Apple; los de
+	// Linux se reponen añadiendo contenedores).
+	const porGrupo = grupos ? estadoPorGrupo(runners ?? [], etiqueta, grupos) : null;
+	if (porGrupo && marcados.length > 0) {
+		l.push(
+			'| Plataforma | En línea | Registrados | Esperados | Ocupados |',
+			'| --- | --- | --- | --- | --- |'
+		);
+		for (const [nombre, conf] of Object.entries(grupos)) {
+			const g = porGrupo[nombre] ?? { total: 0, online: 0, ocupados: 0 };
+			const corto = conf.esperados > 0 && g.total < conf.esperados;
+			l.push(
+				// El aviso va DENTRO de la última celda: colgado detrás del `|` de cierre rompe la tabla.
+				`| \`${celda(nombre)}\`${conf.efimero ? ' (efímero)' : ''} | ${g.online} | ` +
+					`${g.total}${corto ? ' ⚠️' : ''} | ${conf.esperados || '—'} | ${g.ocupados} |`
+			);
+		}
+		l.push('');
+	}
+
 	if (marcados.length === 0) {
 		l.push('> El repo no tiene ningún runner registrado.');
 		return { texto: l.join('\n'), online, total: delFleet.length, faltan };
 	}
 
-	l.push('| Runner | Estado | Ocupado | Del fleet |', '| --- | --- | --- | --- |');
+	l.push('| Runner | Grupo | Estado | Ocupado | Del fleet |', '| --- | --- | --- | --- | --- |');
 	for (const r of marcados) {
 		l.push(
-			`| \`${celda(r.nombre)}\` | ${r.online ? '🟢 en línea' : '🔴 fuera'} | ${
-				r.ocupado ? 'sí' : '—'
-			} | ${r.delFleet ? 'sí' : `no (${celda(r.etiquetas.join(', '))})`} |`
+			`| \`${celda(r.nombre)}\` | ${r.grupo ? `\`${celda(r.grupo)}\`` : '—'} | ${
+				r.online ? '🟢 en línea' : '🔴 fuera'
+			} | ${r.ocupado ? 'sí' : '—'} | ${
+				r.delFleet ? 'sí' : `no (${celda(r.etiquetas.join(', '))})`
+			} |`
 		);
 	}
 
@@ -98,6 +128,7 @@ async function main() {
 	const token = (process.env.SHERMAN_PAT ?? process.env.GH_TOKEN ?? '').trim();
 	const etiqueta = (leerBandera('etiqueta') ?? ETIQUETA_POR_DEFECTO).trim();
 	const esperados = Number(leerBandera('esperados') ?? process.env.RUNNERS_ESPERADOS ?? 0) || 0;
+	const grupos = parsearGrupos(leerBandera('esperados-por') ?? process.env.RUNNERS_ESPERADOS_POR);
 
 	if (!repo) {
 		console.error('Falta el repo (--repo=owner/nombre o REPO_VIGILADO).');
@@ -111,7 +142,7 @@ async function main() {
 	// Aquí SÍ se falla en rojo si la API no responde: se pidió una foto a mano y no hay foto. El
 	// vigía hace lo contrario (sale en verde) porque un mal minuto de GitHub no es un fleet caído.
 	const runners = await consultarRunners(repo, token);
-	const { texto } = construirInforme({ repo, runners, etiqueta, esperados });
+	const { texto } = construirInforme({ repo, runners, etiqueta, esperados, grupos });
 
 	console.log(texto);
 	if (process.env.GITHUB_STEP_SUMMARY) {

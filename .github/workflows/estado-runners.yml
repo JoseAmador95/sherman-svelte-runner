@@ -32,6 +32,9 @@ jobs:
       REPO_VIGILADO: ${{ vars.REPO_VIGILADO || 'demeneghi/sherman-svelte' }}
       CI_RUNNER_LABEL: ${{ vars.CI_RUNNER_LABEL || 'sherman' }}
       RUNNERS_ESPERADOS: ${{ vars.RUNNERS_ESPERADOS || '12' }}
+      # Mismo reparto que usa el vigía; aquí solo alimenta la columna «Grupo» y el resumen por
+      # plataforma. El runner de escritorio es un contenedor, así que cuenta también como `linux`.
+      RUNNERS_ESPERADOS_POR: ${{ vars.RUNNERS_ESPERADOS_POR || 'linux=13,macos=2!,escritorio=1' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -47,4 +50,5 @@ jobs:
           node scripts/estado-runners.mjs \
             --repo="$REPO_VIGILADO" \
             --etiqueta="$CI_RUNNER_LABEL" \
-            --esperados="$RUNNERS_ESPERADOS"
+            --esperados="$RUNNERS_ESPERADOS" \
+            --esperados-por="$RUNNERS_ESPERADOS_POR"
