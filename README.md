@@ -375,6 +375,55 @@ jobs:
       - run: pnpm test
 ```
 
+## Imagen `:escritorio` (cross-compile del instalador de Windows)
+
+Sherman-svelte es una app **Tauri v2**, y hoy su instalador de Windows se compila en
+`windows-latest` (un runner **de pago**). Se puede cross-compilar desde Linux con
+`cargo-xwin` + NSIS, y para eso existe la imagen `ghcr.io/joseamador95/sherman-svelte-runner:escritorio`.
+
+**Va en un `Containerfile` y un tag aparte de la imagen principal** (`Containerfile.escritorio`,
+tag `:escritorio`). La imagen principal no lleva Rust — la CI lo instala por job con
+`dtolnay/rust-toolchain` — y sumarle aquí rustup + el target MSVC + clang/lld/llvm + NSIS
+pesa entre 3 y 4 GB más. Multiplicado por los 12 runners del fleet y un rebuild diario, ese
+peso serviría a un workflow que es solo `workflow_dispatch` y corre unas pocas veces al mes:
+no vale la pena cargarlo en la imagen que sí se usa todos los días.
+
+Por el mismo motivo, `build-image-escritorio.yml` reconstruye **semanal** (domingos), no a
+diario como `build-image.yml`, y antes de publicar corre una **sonda** dentro de la propia
+imagen: instala el toolchain, genera un instalador NSIS vacío y cross-compila un binario
+`cargo new --bin` real con `cargo xwin`, verificando la cabecera PE del `.exe` resultante
+(sin ejecutarlo, sin wine). Si algo del toolchain se rompe, la imagen rota nunca llega a GHCR.
+
+**El SDK de Windows (cabeceras y libs del CRT) NO va horneado en la imagen.** `cargo-xwin`
+lo descarga bajo la EULA de Microsoft, que permite usarlo para compilar pero no
+redistribuirlo — y esta imagen se publica en un registro **público**. Por eso se descarga la
+primera vez que un runner lo necesita y se queda en el volumen de cache persistente, no en la
+imagen: al desplegar el runner de escritorio hay que pasar `--cache-dirs .cargo,.cache/xwin`
+además de lo habitual.
+
+### Desplegar un runner de escritorio
+
+Un runner de escritorio dedicado (no hace falta más de uno: el workflow es manual y esporádico),
+con el label extra `escritorio` para que la app lo pueda seleccionar aparte del resto del fleet:
+
+```bash
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy.sh)" -- \
+  --repo demeneghi/sherman-svelte \
+  --image ghcr.io/joseamador95/sherman-svelte-runner:escritorio \
+  --prefix sherman-escritorio --labels sherman,escritorio \
+  --count 1 --cache-dirs .cargo,.cache/xwin --vigilar
+```
+
+Y en la app, el job del instalador de Windows se dirige a él con:
+
+```yaml
+runs-on: [self-hosted, sherman, escritorio]
+```
+
+Igual que el resto del fleet, sin respaldo de pago: si este runner concreto está caído, ese
+job en particular se queda en cola hasta que vuelva (o, si hace falta que no espere nunca,
+sigue apuntando a `windows-latest`).
+
 ## Por qué imagen derivada (y no fork ni submódulo)
 
 - **Fork de gh_runner** → divergiría del upstream; los arreglos del base no llegan solos.

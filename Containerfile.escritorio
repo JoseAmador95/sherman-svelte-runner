@@ -1,0 +1,81 @@
+# Runner para compilar el instalador de Windows de Sherman-svelte (Tauri v2) por
+# CROSS-COMPILE desde Linux, sin pagar `windows-latest`.
+#
+# IMAGEN APARTE, NO LA PRINCIPAL. El `Containerfile` de este repo no trae Rust (la CI
+# lo instala por job con dtolnay/rust-toolchain): añadir aquí rustup + el target MSVC +
+# clang/lld/llvm + NSIS suma entre 3 y 4 GB sobre una imagen de ~2,5-3 GB. Multiplicado
+# por los 12 runners del fleet y un rebuild diario, ese peso serviría a un workflow que
+# es SOLO `workflow_dispatch` y corre unas pocas veces al mes. Por eso vive en su propio
+# tag `:escritorio`, con su propio workflow de build semanal (ver
+# .github/workflows/build-image-escritorio.yml), y los runners que la usan se despliegan
+# aparte con el label extra `escritorio` (ver README).
+#
+# Build local (detecta la arch del host):
+#   podman build -f Containerfile.escritorio -t sherman-svelte-runner:escritorio-local .
+
+FROM ghcr.io/joseamador95/sherman-svelte-runner:latest
+
+LABEL org.opencontainers.image.source="https://github.com/JoseAmador95/sherman-svelte-runner"
+
+USER root
+
+# ---- Toolchain de cross-compile a Windows (MSVC) desde Linux ---------------
+# clang/lld/llvm: `cargo-xwin` usa `lld-link` (parte de lld) como linker y `llvm-lib`/
+# `llvm-rc` (parte de llvm) para empaquetar libs y recursos .rc de Tauri; sin clang,
+# el propio cargo-xwin no compila (usa cc para invocar el preprocesador de C de los
+# crates con build.rs en C, como algunos de rodio/webview2).
+# nsis: es el empaquetador del instalador .exe que genera `tauri-bundler` (bundle NSIS,
+# el que usa el proyecto en windows-latest hoy). Sin él, `tauri build` compila el
+# binario pero no produce el instalador.
+# pkg-config/libssl-dev: dependencias de build de crates que compilan bindings nativos
+# aunque el target final sea Windows (el propio cargo-xwin y sus dependencias corren en
+# el host Linux).
+# file/xz-utils: usados por el instalador de rustup y por cargo-xwin al descomprimir
+# el cache del SDK de Windows (ver más abajo).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        clang \
+        lld \
+        llvm \
+        nsis \
+        pkg-config \
+        libssl-dev \
+        file \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+USER runner
+WORKDIR /home/runner
+
+# rustup solo, sin cargo-binstall ni componentes de más: minimal + toolchain estable
+# fijo. El target x86_64-pc-windows-msvc es el que Tauri exige para MSVC (el ABI que
+# consume el resto del ecosistema Windows, WebView2 incluido); GNU no vale para Tauri.
+ENV RUSTUP_HOME=/home/runner/.rustup \
+    CARGO_HOME=/home/runner/.cargo \
+    PATH=/home/runner/.cargo/bin:$PATH
+
+RUN curl -fsSL --proto '=https' --tlsv1.2 https://sh.rustup.rs -o /tmp/rustup-init.sh \
+    && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain stable \
+    && rm /tmp/rustup-init.sh \
+    && rustup target add x86_64-pc-windows-msvc \
+    && cargo install --locked cargo-xwin
+
+# ---- El SDK de Windows NO se hornea aquí: va al volumen persistente por runner ------
+# `cargo xwin` necesita las cabeceras y libs del CRT + el Windows SDK de Microsoft para
+# poder linkear contra el target MSVC. Esos archivos están bajo la EULA de Microsoft:
+# se pueden DESCARGAR y USAR para compilar, pero NO se pueden REDISTRIBUIR. Esta imagen
+# se publica en un registro PÚBLICO de GHCR, así que hornear el SDK aquí dentro sería
+# redistribuirlo sin licencia para hacerlo — no es un problema de tamaño de imagen, es
+# legal, y por eso no hay un `RUN cargo xwin build ...` de precalentamiento en este
+# Containerfile por más tentador que sea para "ahorrar" la descarga en cada job.
+#
+# La solución es la misma que ya usa este fleet para el store de pnpm: un volumen
+# CACHE persistente por runner (no horneado en la imagen), que se llena la primera vez
+# que un job de esa máquina cross-compila y se reusa en los siguientes. Se activa
+# desplegando con `--cache-dirs .cargo,.cache/xwin` (ver README), así que XWIN_CACHE_DIR
+# apunta dentro de ese `.cache` persistente y CARGO_HOME (ya usado arriba para
+# rustup/cargo-xwin) también persiste el registry de crates de cargo-xwin entre jobs.
+ENV XWIN_CACHE_DIR=/home/runner/.cache/xwin
+
+# NO redefinimos ENTRYPOINT: se hereda el de gh_runner (registro efímero), vía la
+# imagen base sherman-svelte-runner:latest.

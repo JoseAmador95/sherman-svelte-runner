@@ -1,0 +1,132 @@
+name: build-image-escritorio
+
+# Build de la imagen ':escritorio' (Node/pnpm heredado + Rust/cargo-xwin/NSIS para
+# cross-compilar el instalador de Windows de Tauri desde Linux). Ver Containerfile.escritorio
+# para el porqué de que sea una imagen aparte de la principal.
+#
+# CADENCIA SEMANAL, no diaria como build-image.yml: el toolchain de Rust (rustup stable,
+# cargo-xwin, NSIS) no cambia a diario, y esta imagen es varios GB más pesada que la
+# principal por el SDK de build de Rust + LLVM. Reconstruirla cada día multiplicaría ese
+# costo de transferencia/registro para un workflow que además es solo `workflow_dispatch`
+# y corre unas pocas veces al mes. Domingos de madrugada, fuera de horario de CI normal.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Containerfile.escritorio"
+      - ".github/workflows/build-image-escritorio.yml"
+  schedule:
+    - cron: "0 5 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # QEMU + buildx: build multi-arch (amd64 + arm64). Las DOS, no solo amd64: las
+      # etiquetas de `runs-on` (sherman, escritorio) no codifican arquitectura, así que
+      # si el scheduler del fleet mandara el job a una máquina arm64 y la imagen solo
+      # existiera en amd64, el pull fallaría (o peor, correría emulado). `lld-link`
+      # cross-linkea a x86_64-windows desde un host arm64 sin ningún problema: el
+      # linker no necesita coincidir con la arquitectura de destino.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=escritorio
+            type=sha,suffix=-escritorio
+
+      # Build de PRUEBA, solo amd64 (la arquitectura del runner de Actions) y `load:
+      # true` para poder correr la sonda contra la imagen local antes de publicar nada.
+      # El exportador `docker` de buildx no admite `load` con varias plataformas a la
+      # vez, por eso este build de prueba y el de publicación (más abajo) van
+      # separados: uno construye para probar, el otro construye multi-arch para
+      # publicar. El segundo reutiliza la cache de este primero (misma `scope`), así
+      # que no vuelve a pagar el coste de compilar el toolchain de Rust.
+      - uses: docker/build-push-action@v6
+        id: build-sonda
+        with:
+          context: .
+          file: ./Containerfile.escritorio
+          platforms: linux/amd64
+          push: false
+          load: true
+          # Fuerza re-bajar el FROM (sherman-svelte-runner:latest) en cada build
+          # semanal, para heredar los arreglos de la imagen principal.
+          pull: true
+          tags: sherman-svelte-runner:escritorio-sonda
+          cache-from: type=gha,scope=escritorio
+          cache-to: type=gha,mode=max,scope=escritorio
+
+      # ---- Sonda: el cross-compile de verdad, ANTES de publicar --------------------
+      # Nada de esto ejecuta el .exe resultante (nada de wine): añadir un emulador de
+      # Windows solo para "probar" el cross-compile sería más superficie de fallo que
+      # lo que en realidad hace falta verificar (que el binario PE se generó bien).
+      #
+      # La sonda descarga el SDK de xwin (NO horneado en la imagen, ver
+      # Containerfile.escritorio) así que esta parte tarda varios minutos. Es
+      # aceptable en un workflow semanal y manual; no se metería este costo en un
+      # build diario.
+      - name: Sonda de cross-compile a Windows (msvc, nsis y xwin)
+        run: |
+          set -eu
+          IMG="sherman-svelte-runner:escritorio-sonda"
+          cid=$(docker create "$IMG" bash -lc '
+            set -eu
+            echo "--- 1) target msvc instalado ---"
+            rustup target list --installed | grep -q x86_64-pc-windows-msvc
+
+            echo "--- 2) NSIS disponible y funcional ---"
+            makensis -VERSION
+            printf "OutFile \"/tmp/sonda-instalador.exe\"\nSection\nSectionEnd\n" > /tmp/sonda.nsi
+            makensis /tmp/sonda.nsi
+            test -s /tmp/sonda-instalador.exe
+
+            echo "--- 3) cross-compile real con cargo-xwin (el 90% del riesgo) ---"
+            cd /tmp
+            cargo new --bin sonda
+            cd sonda
+            cargo xwin build --release --target x86_64-pc-windows-msvc
+            cp target/x86_64-pc-windows-msvc/release/sonda.exe /tmp/sonda.exe
+
+            echo "--- 4) el .exe resultante existe ---"
+            test -f /tmp/sonda.exe
+          ')
+          docker start --attach "$cid"
+          docker cp "$cid:/tmp/sonda.exe" ./sonda.exe
+          docker rm "$cid" >/dev/null
+
+      # No se ejecuta el .exe (nada de wine): solo se valida su cabecera PE, que es lo
+      # único que hace falta comprobar tras un cross-compile.
+      - name: Verificar cabecera PE del binario cross-compilado
+        run: python3 scripts/verificar_pe.py ./sonda.exe
+
+      - name: Publicar la imagen (multi-arch, tras pasar la sonda)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile.escritorio
+          platforms: linux/amd64,linux/arm64
+          push: true
+          pull: false
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=escritorio
+          cache-to: type=gha,mode=max,scope=escritorio
