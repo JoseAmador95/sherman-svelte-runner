@@ -395,3 +395,129 @@ jobs:
           diff -u <(grep -v '^#' "$AVPS/conf-sh") <(grep -v '^#' "$AVPS/conf-ps") \
             || { echo "FALLO: los dos scripts escriben avisos.conf distinto"; exit 1; }
           echo "ok: mismo formato de avisos.conf desde las dos shells"
+
+  # `scripts/aprovisionar-macos.sh` es el gancho `--provisionar` de `hornear-macos.sh`
+  # (gh_runner): lo ejecuta DENTRO de la VM golden, por ssh, y la golden se congela justo
+  # después. Un fallo a mitad de camino sin más prueba que "se ve razonable" se descubre
+  # en el primer job real, con el runner ya en producción — la misma familia de fallo
+  # silencioso que motivó el resto de este workflow. Aquí no hay una VM de macOS de
+  # verdad (el fleet corre en Linux), así que se prueba la LÓGICA del script con
+  # herramientas simuladas (`brew`, `corepack`, `rustup-init`/`rustup`, `curl`,
+  # `xcodebuild`): que instala en la primera pasada, que la segunda no reinstala nada
+  # (idempotencia, obligatoria porque `--completo` se reintenta tras un fallo) y que
+  # aborta con un mensaje útil si una herramienta no queda instalada.
+  aprovisionar-macos:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepara un macOS simulado (brew, corepack, rustup, curl, xcodebuild)
+        run: |
+          set -eu
+          d="$RUNNER_TEMP/apm"; mkdir -p "$d/bin" "$d/home" "$d/log"
+          {
+            echo "APM=$d"
+            echo "APM_HOME=$d/home"
+          } >> "$GITHUB_ENV"
+
+          # `brew`: instala node@22 (crea el stub de `node` + `corepack`) y
+          # `rustup-init` (crea el stub de `rustup`/`cargo` en ~/.cargo/bin, como
+          # hace el rustup-init real). Registra cada llamada en brew.log para que
+          # la prueba de idempotencia pueda comprobar que la segunda vuelta no
+          # vuelve a instalar.
+          cat > "$d/bin/brew" <<'BREW'
+          #!/bin/sh
+          echo "brew $*" >> "$APM/log/brew.log"
+          case "$1" in
+            shellenv) echo "export PATH=\"$APM/bin:\$PATH\"" ;;
+            install)
+              shift
+              for pkg in "$@"; do
+                case "$pkg" in
+                  node@22)
+                    printf '#!/bin/sh\n[ "$1" = "--version" ] && echo "v22.11.0"\n' > "$APM/bin/node"
+                    chmod +x "$APM/bin/node"
+                    cat > "$APM/bin/corepack" <<'COREPACK'
+          #!/bin/sh
+          echo "corepack $*" >> "$APM/log/corepack.log"
+          case "$1" in
+            enable) exit 0 ;;
+            prepare)
+              ver="${2#pnpm@}"
+              printf '#!/bin/sh\n[ "$1" = "--version" ] && echo "%s"\n' "$ver" > "$APM/bin/pnpm"
+              chmod +x "$APM/bin/pnpm"
+              ;;
+          esac
+          COREPACK
+                    chmod +x "$APM/bin/corepack"
+                    ;;
+                  rustup-init)
+                    cat > "$APM/bin/rustup-init" <<'RUSTUPINIT'
+          #!/bin/sh
+          echo "rustup-init $*" >> "$APM/log/rustup-init.log"
+          mkdir -p "$HOME/.cargo/bin"
+          printf '#!/bin/sh\necho "rustup $*" >> "$APM/log/rustup.log"\nexit 0\n' > "$HOME/.cargo/bin/rustup"
+          printf '#!/bin/sh\n[ "$1" = "--version" ] && echo "cargo 1.82.0"\n' > "$HOME/.cargo/bin/cargo"
+          chmod +x "$HOME/.cargo/bin/rustup" "$HOME/.cargo/bin/cargo"
+          RUSTUPINIT
+                    chmod +x "$APM/bin/rustup-init"
+                    ;;
+                esac
+              done
+              ;;
+            link) : ;;
+          esac
+          BREW
+          chmod +x "$d/bin/brew"
+
+          printf '#!/bin/sh\n[ "$1" = "-version" ] && printf "Xcode 16.4\\nBuild version 16F6\\n"\n' > "$d/bin/xcodebuild"
+          chmod +x "$d/bin/xcodebuild"
+
+          # `curl` NO debería invocarse nunca en este entorno: brew y rustup-init
+          # ya están "instalados" (son los stubs de arriba), así que el único
+          # camino que llamaría a curl es el de bootstrap de Homebrew, que aquí
+          # sería un defecto del script (asumir curl sin comprobarlo). Falla
+          # fuerte para que la prueba lo note en vez de colgarse.
+          printf '#!/bin/sh\necho "curl no debería haberse llamado: $*" >&2\nexit 1\n' > "$d/bin/curl"
+          chmod +x "$d/bin/curl"
+
+      - name: 'Primera pasada: instala todo y verifica en verde'
+        run: |
+          set -eu
+          export HOME="$APM_HOME" MACOS_STUB_LOG="$APM/log" MACOS_STUB_BIN="$APM/bin"
+          export PATH="$APM/bin:$APM_HOME/.cargo/bin:/usr/bin:/bin"
+          salida="$(sh scripts/aprovisionar-macos.sh 2>&1)" || {
+            echo "FALLO: la primera pasada no terminó en verde"; printf '%s\n' "$salida"; exit 1; }
+          printf '%s\n' "$salida" | grep -q 'Aprovisionamiento de macOS para sherman-svelte completado.' \
+            || { echo "FALLO: no llegó al mensaje final de éxito"; printf '%s\n' "$salida"; exit 1; }
+          grep -qx 'brew install node@22' "$APM/log/brew.log" || { echo "FALLO: no instaló Node"; exit 1; }
+          grep -qx 'brew install rustup-init' "$APM/log/brew.log" || { echo "FALLO: no instaló rustup"; exit 1; }
+          echo "ok: primera pasada instala Node, pnpm y Rust, y verifica en verde"
+
+      - name: 'Segunda pasada seguida: no reinstala nada (idempotencia)'
+        run: |
+          set -eu
+          export HOME="$APM_HOME" MACOS_STUB_LOG="$APM/log" MACOS_STUB_BIN="$APM/bin"
+          export PATH="$APM/bin:$APM_HOME/.cargo/bin:/usr/bin:/bin"
+          rm -f "$APM/log/brew.log" "$APM/log/corepack.log"
+          salida="$(sh scripts/aprovisionar-macos.sh 2>&1)" || {
+            echo "FALLO: la segunda pasada no terminó en verde"; printf '%s\n' "$salida"; exit 1; }
+          printf '%s\n' "$salida" | grep -q 'Aprovisionamiento de macOS para sherman-svelte completado.' \
+            || { echo "FALLO: la segunda pasada no llegó al mensaje final de éxito"; printf '%s\n' "$salida"; exit 1; }
+          # Sin ninguna línea de "instalando": los tres pasos detectaron la
+          # versión ya satisfecha y no llamaron a brew/corepack de nuevo.
+          [ -s "$APM/log/brew.log" ] && { echo "FALLO: la segunda pasada volvió a llamar a brew install/link"; cat "$APM/log/brew.log"; exit 1; }
+          [ -s "$APM/log/corepack.log" ] && { echo "FALLO: la segunda pasada volvió a llamar a corepack"; cat "$APM/log/corepack.log"; exit 1; }
+          echo "ok: la segunda pasada es idempotente, no reinstala Node/pnpm/rustup"
+
+      - name: Sin xcodebuild, aborta alto y claro (no sigue en silencio)
+        run: |
+          set -eu
+          rm -f "$APM/bin/xcodebuild"
+          export HOME="$APM_HOME" MACOS_STUB_LOG="$APM/log" MACOS_STUB_BIN="$APM/bin"
+          export PATH="$APM/bin:$APM_HOME/.cargo/bin:/usr/bin:/bin"
+          rc=0; salida="$(sh scripts/aprovisionar-macos.sh 2>&1)" || rc=$?
+          [ "$rc" -ne 0 ] || { echo "FALLO: siguió en silencio sin xcodebuild"; exit 1; }
+          printf '%s\n' "$salida" | grep -q 'xcodebuild: no está instalado' \
+            || { echo "FALLO: no dio un motivo claro del fallo"; printf '%s\n' "$salida"; exit 1; }
+          echo "ok: aborta con un mensaje útil si una herramienta no quedó instalada"

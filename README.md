@@ -424,6 +424,40 @@ Igual que el resto del fleet, sin respaldo de pago: si este runner concreto est�
 job en particular se queda en cola hasta que vuelva (o, si hace falta que no espere nunca,
 sigue apuntando a `windows-latest`).
 
+## Camino macOS (runner nativo, VMs de Tart)
+
+Para `movil-release.yml` (compilar y firmar el `.ipa` con `xcodebuild`) y, si algún día se
+enruta ahí, el bundler de Tauri (`.dmg`/`.app`) no hay contenedor: macOS no lo virtualiza
+como Linux. El equivalente aquí no es un `Containerfile`, es un **script de aprovisionamiento**
+— `scripts/aprovisionar-macos.sh` — que instala Node 22, pnpm (vía corepack) y Rust estable
+con el target `aarch64-apple-darwin` **dentro de la VM "golden"** de
+[`gh_runner`](https://github.com/JoseAmador95/gh_runner), una sola vez por horneado.
+
+El runner se despliega con `deploy-macos.sh` de gh_runner, en un Mac de Apple Silicon del
+fleet. Son dos pasos, en ese Mac:
+
+```bash
+# 1. Hornea (o refresca) la golden con el toolchain de este proyecto. Cadencia
+#    semanal — solo cuando cambie Node, pnpm o el toolchain de Rust.
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/hornear-macos.sh)" -- \
+  --completo \
+  --provisionar https://raw.githubusercontent.com/JoseAmador95/sherman-svelte-runner/main/scripts/aprovisionar-macos.sh
+
+# 2. Despliega el runner efímero contra esa golden.
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/JoseAmador95/gh_runner/main/deploy-macos.sh)" -- \
+  --repo demeneghi/sherman-svelte \
+  --prefix sherman --labels sherman \
+  --count 1 --memory 20G --vigilar --up
+```
+
+**Labels: `sherman`.** GitHub añade solas `self-hosted`, `macOS` y la arquitectura (`ARM64`);
+no hace falta repetirlas en `--labels`.
+
+**En la app no hay que tocar ningún workflow.** `movil-release.yml:133` ya trae la escotilla:
+con la variable de repositorio `MACOS_RUNNER` puesta en `propio`, el job `publicar` (motor
+`github-macos`) se dirige a `[self-hosted, macos, sherman]` en vez del runner de pago
+`macos-15`, sin editar el archivo.
+
 ## Por qué imagen derivada (y no fork ni submódulo)
 
 - **Fork de gh_runner** → divergiría del upstream; los arreglos del base no llegan solos.
